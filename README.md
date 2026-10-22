@@ -17,15 +17,30 @@ A process has to load all libraries its model needs.
 
 The spconv library is only built when `spconv` and `cumm` are found at configure time.
 
-## Dependencies
+## Build
 
-Build dependencies are limited to packages available as binaries (apt / rosdistro) plus `spconv`:
+`autoware_tensorrt_plugins` is a plain CMake project that builds in a bare CUDA + TensorRT environment without ROS, ament or Autoware, and unchanged as a package of a ROS 2 workspace, where it uses `ament_cmake` opportunistically to register with the ament index.
 
-- CUDA toolkit and TensorRT 10 (installed by Autoware's setup scripts, or the NVIDIA apt repositories)
-- ROS 2 build tooling released to rosdistro: `ament_cmake_auto`, `autoware_cmake`, `tensorrt_cmake_module`
-- `spconv` and `cumm` (prebuilt `.deb` packages from [spconv_cpp](https://github.com/autowarefoundation/spconv_cpp), optional: without them only `libautoware_tensorrt_plugins.so` is built)
+### Dependencies
 
-There is no dependency on any Autoware package that is not released as a binary, at build or run time.
+- CUDA toolkit 12 and TensorRT 10 (`libnvinfer-dev` from the NVIDIA apt repositories, or Autoware's setup scripts). Set `TENSORRT_ROOT` if TensorRT is installed in a non-standard prefix.
+- `spconv` and `cumm` (prebuilt `.deb` packages from [spconv_cpp](https://github.com/autowarefoundation/spconv_cpp)), optional: without them only `libautoware_tensorrt_plugins.so` is built.
+- `libgtest-dev` for the tests (optional).
+
+### Standalone
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/autoware_tensorrt_plugins
+cmake --build build -j"$(nproc)"
+ctest --test-dir build
+cmake --install build
+```
+
+Options: `CMAKE_CUDA_ARCHITECTURES` (defaults to the Autoware set: Turing through Blackwell), `BUILD_SPCONV_PLUGINS` (default `ON` when spconv is found), `BUILD_TESTING` (default `ON`).
+
+### In a ROS 2 workspace
+
+Clone the repository into the workspace's `src/` and build with `colcon build` as usual. When `ament_cmake` is found at configure time (any sourced ROS 2 environment), the package registers itself in the ament index and installs the usual environment hooks, so `ros2 pkg prefix autoware_tensorrt_plugins` and `$(find-pkg-share autoware_tensorrt_plugins)` in launch and parameter files resolve exactly as before. Nodes that load the plugins need no changes. The installed tree is the same with or without ament; without it, the package is simply not registered.
 
 ## Algorithms
 
