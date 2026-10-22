@@ -13,9 +13,8 @@
 // limitations under the License.
 
 #include "autoware/unique_ops/unique.hpp"
+#include "cuda_gtest_utils.hpp"
 #include "test_utils.hpp"
-
-#include <autoware/cuda_utils/cuda_gtest_utils.hpp>
 
 #include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
