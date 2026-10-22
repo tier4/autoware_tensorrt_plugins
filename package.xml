@@ -13,16 +13,11 @@
 
   <license>Apache License 2.0</license>
 
-  <buildtool_depend>ament_cmake_auto</buildtool_depend>
-  <buildtool_depend>autoware_cmake</buildtool_depend>
-  <buildtool_depend>tensorrt_cmake_module</buildtool_depend>
+  <!-- The build itself is plain CMake and needs neither ROS nor ament. In a ROS 2 environment
+       ament_cmake is used, when found, to register the package in the ament index. -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <buildtool_export_depend>tensorrt_cmake_module</buildtool_export_depend>
-
-  <test_depend>ament_cmake_gtest</test_depend>
-  <test_depend>ament_cmake_ros</test_depend>
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>autoware_lint_common</test_depend>
+  <test_depend>libgtest-dev</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
