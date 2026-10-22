@@ -17,6 +17,16 @@ A process has to load all libraries its model needs.
 
 The spconv library is only built when `spconv` and `cumm` are found at configure time.
 
+## Dependencies
+
+Build dependencies are limited to packages available as binaries (apt / rosdistro) plus `spconv`:
+
+- CUDA toolkit and TensorRT 10 (installed by Autoware's setup scripts, or the NVIDIA apt repositories)
+- ROS 2 build tooling released to rosdistro: `ament_cmake_auto`, `autoware_cmake`, `tensorrt_cmake_module`
+- `spconv` and `cumm` (prebuilt `.deb` packages from [spconv_cpp](https://github.com/autowarefoundation/spconv_cpp), optional: without them only `libautoware_tensorrt_plugins.so` is built)
+
+There is no dependency on any Autoware package that is not released as a binary, at build or run time.
+
 ## Algorithms
 
 The following operations are implemented:
