@@ -19,11 +19,16 @@
 
 #include <cstdint>
 
-// These are the functions that TensorRT library will call at the runtime.
+// Entry points TensorRT looks up in a plugin shared library
+// (IPluginRegistry::loadLibrary). Every plugin library built from this package
+// exports its own pair; the symbols are kept visible explicitly because the
+// libraries are otherwise built with hidden visibility.
 
-extern "C" void setLoggerFinder(nvinfer1::ILoggerFinder * finder);
+#define AUTOWARE_TENSORRT_PLUGINS_EXPORT __attribute__((visibility("default")))
 
-extern "C" nvinfer1::IPluginCreatorInterface * const * getPluginCreators(
+extern "C" AUTOWARE_TENSORRT_PLUGINS_EXPORT void setLoggerFinder(nvinfer1::ILoggerFinder * finder);
+
+extern "C" AUTOWARE_TENSORRT_PLUGINS_EXPORT nvinfer1::IPluginCreatorInterface * const * getCreators(
   std::int32_t & num_creators);
 
 #endif  // AUTOWARE__TENSORRT_PLUGINS__PLUGIN_REGISTRATION_HPP_

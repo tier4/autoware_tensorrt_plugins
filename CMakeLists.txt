@@ -61,7 +61,7 @@ else()
   set(SPCONV_AVAIL OFF)
 endif()
 
-if(TRT_AVAIL AND CUDA_AVAIL AND SPCONV_AVAIL)
+if(TRT_AVAIL AND CUDA_AVAIL)
   find_package(tensorrt_cmake_module REQUIRED)
   find_package(TENSORRT)
   if(TENSORRT_VERSION VERSION_LESS 10.0)
@@ -81,7 +81,6 @@ if(TRT_AVAIL AND CUDA_AVAIL AND SPCONV_AVAIL)
     set(CMAKE_CUDA_FLAGS ${CMAKE_CUDA_FLAGS} "-g -G")
   endif()
 
-  add_definitions("-DTV_CUDA")
 
   # cSpell:ignore expt
   list(APPEND CUDA_NVCC_FLAGS "--expt-relaxed-constexpr -diag-suppress 1675 --extended-lambda")
@@ -111,19 +110,18 @@ if(TRT_AVAIL AND CUDA_AVAIL AND SPCONV_AVAIL)
     src/select_and_pad_ops/select_and_pad_kernel.cu
   )
 
+  # The plugins are split into two shared libraries by external dependency:
+  #   libautoware_tensorrt_plugins.so        pure CUDA plugins (cudart + nvinfer only)
+  #   libautoware_tensorrt_plugins_spconv.so sparse-convolution plugins (+ spconv/cumm)
+  # Consumers load the libraries they need; a process must never load two libraries that
+  # provide the same plugin name (e.g. this spconv library and a replacement for it).
+  set(PLUGIN_LIBRARIES ${PROJECT_NAME})
+
   add_library(${PROJECT_NAME} SHARED
     src/argsort_plugin.cpp
     src/argsort_plugin_creator.cpp
     src/quick_cumsum_cuda_plugin.cpp
     src/quick_cumsum_cuda_plugin_creator.cpp
-    src/get_indices_pairs_implicit_gemm_plugin_creator.cpp
-    src/get_indices_pairs_implicit_gemm_plugin.cpp
-    src/get_indices_pairs_plugin_creator.cpp
-    src/get_indices_pairs_plugin.cpp
-    src/implicit_gemm_plugin_creator.cpp
-    src/implicit_gemm_plugin.cpp
-    src/indice_conv_plugin_creator.cpp # cSpell:ignore indice
-    src/indice_conv_plugin.cpp
     src/multi_scale_deformable_attention_plugin.cpp
     src/multi_scale_deformable_attention_plugin_creator.cpp
     src/rotate_plugin.cpp
@@ -138,14 +136,48 @@ if(TRT_AVAIL AND CUDA_AVAIL AND SPCONV_AVAIL)
     src/plugin_utils.cpp
   )
 
-  target_compile_definitions(${PROJECT_NAME} PRIVATE _GLIBCXX_USE_CXX11_ABI=1)
-
   target_link_libraries(${PROJECT_NAME} PRIVATE
       ${NVINFER}
       CUDA::cudart
       cuda_ops
-      spconv::spconv
   )
+
+  if(SPCONV_AVAIL)
+    add_library(${PROJECT_NAME}_spconv SHARED
+      src/get_indices_pairs_implicit_gemm_plugin_creator.cpp
+      src/get_indices_pairs_implicit_gemm_plugin.cpp
+      src/get_indices_pairs_plugin_creator.cpp
+      src/get_indices_pairs_plugin.cpp
+      src/implicit_gemm_plugin_creator.cpp
+      src/implicit_gemm_plugin.cpp
+      src/indice_conv_plugin_creator.cpp # cSpell:ignore indice
+      src/indice_conv_plugin.cpp
+      src/plugin_registration_spconv.cpp
+      src/plugin_utils.cpp
+    )
+
+    target_compile_definitions(${PROJECT_NAME}_spconv PRIVATE TV_CUDA)
+
+    target_link_libraries(${PROJECT_NAME}_spconv PRIVATE
+        ${NVINFER}
+        CUDA::cudart
+        spconv::spconv
+    )
+
+    list(APPEND PLUGIN_LIBRARIES ${PROJECT_NAME}_spconv)
+  else()
+    message(WARNING "spconv is NOT available: the sparse convolution plugins will not be built")
+  endif()
+
+  foreach(plugin_library IN LISTS PLUGIN_LIBRARIES)
+    target_compile_definitions(${plugin_library} PRIVATE _GLIBCXX_USE_CXX11_ABI=1)
+    # Only the TensorRT entry points (getCreators, setLoggerFinder) are exported, so that
+    # nothing leaks between plugin libraries loaded into the same process.
+    set_target_properties(${plugin_library} PROPERTIES
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON
+    )
+  endforeach()
 
   if(BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)
@@ -171,7 +203,7 @@ if(TRT_AVAIL AND CUDA_AVAIL AND SPCONV_AVAIL)
   endif()
 
   install(
-    TARGETS ${PROJECT_NAME}
+    TARGETS ${PLUGIN_LIBRARIES}
     DESTINATION share/${PROJECT_NAME}/plugins
   )
 
