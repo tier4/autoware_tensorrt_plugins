@@ -174,15 +174,15 @@ if(BUILD_TESTING)
 endif()
 
 # --- Install --------------------------------------------------------------------------------
-# Same tree with or without ament: consumers keep resolving
+# Same layout with or without ament: consumers keep resolving
 # $(find-pkg-share autoware_tensorrt_plugins)/plugins/<library>.so.
 set(PACKAGE_SHARE_DIR share/${PROJECT_NAME})
 install(TARGETS ${PLUGIN_LIBRARIES} LIBRARY DESTINATION ${PACKAGE_SHARE_DIR}/plugins)
-install(FILES package.xml DESTINATION ${PACKAGE_SHARE_DIR})
 
 if(ament_cmake_FOUND)
-  # Registers the package in the ament index and installs the environment hooks colcon
-  # sources, so ros2 pkg / ament_index / launch's find-pkg-share find this prefix.
+  # Registers the package in the ament index and installs package.xml and the environment
+  # hooks colcon sources, so ros2 pkg / ament_index / launch's find-pkg-share find this prefix.
+  install(FILES package.xml DESTINATION ${PACKAGE_SHARE_DIR})
   ament_package()
 else()
   message(STATUS "ament_cmake not found: the package will not be registered in the ament index")

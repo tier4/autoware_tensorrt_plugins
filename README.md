@@ -19,11 +19,11 @@ The spconv library is only built when `spconv` and `cumm` are found at configure
 
 ## Build
 
-`autoware_tensorrt_plugins` is a plain CMake project that builds in a bare CUDA + TensorRT environment without ROS, ament or Autoware, and unchanged as a package of a ROS 2 workspace, where it uses `ament_cmake` opportunistically to register with the ament index.
+`autoware_tensorrt_plugins` is a plain CMake project that builds in a bare CUDA + TensorRT environment without ROS, ament or Autoware. In a ROS environment, it registers with the ament index for `find-pkg-share` support.
 
 ### Dependencies
 
-- CUDA toolkit 12 and TensorRT 10 (`libnvinfer-dev` from the NVIDIA apt repositories, or Autoware's setup scripts). Set `TENSORRT_ROOT` if TensorRT is installed in a non-standard prefix.
+- CUDA toolkit 12 and TensorRT 10 (`libnvinfer-dev`). Set `TENSORRT_ROOT` if TensorRT is installed in a non-standard prefix.
 - `spconv` and `cumm` (prebuilt `.deb` packages from [spconv_cpp](https://github.com/autowarefoundation/spconv_cpp)), optional: without them only `libautoware_tensorrt_plugins.so` is built.
 - `libgtest-dev` for the tests (optional).
 
@@ -36,11 +36,15 @@ ctest --test-dir build
 cmake --install build
 ```
 
-Options: `CMAKE_CUDA_ARCHITECTURES` (defaults to the Autoware set: Turing through Blackwell), `BUILD_SPCONV_PLUGINS` (default `ON` when spconv is found), `BUILD_TESTING` (default `ON`).
+Options:
+
+- `CMAKE_CUDA_ARCHITECTURES`: defaults to the Autoware set (Turing through Blackwell)
+- `BUILD_SPCONV_PLUGINS`: default `ON` when spconv is found
+- `BUILD_TESTING`: default `ON`
 
 ### In a ROS 2 workspace
 
-Clone the repository into the workspace's `src/` and build with `colcon build` as usual. When `ament_cmake` is found at configure time (any sourced ROS 2 environment), the package registers itself in the ament index and installs the usual environment hooks, so `ros2 pkg prefix autoware_tensorrt_plugins` and `$(find-pkg-share autoware_tensorrt_plugins)` in launch and parameter files resolve exactly as before. Nodes that load the plugins need no changes. The installed tree is the same with or without ament; without it, the package is simply not registered.
+Build with `colcon build` as usual. With `ament_cmake` found at configure time, the package is registered in the ament index, so `$(find-pkg-share autoware_tensorrt_plugins)` resolves as before.
 
 ## Algorithms
 
