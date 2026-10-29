@@ -113,8 +113,7 @@ if(TRT_AVAIL AND CUDA_AVAIL)
   # The plugins are split into two shared libraries by external dependency:
   #   libautoware_tensorrt_plugins.so        pure CUDA plugins (cudart + nvinfer only)
   #   libautoware_tensorrt_plugins_spconv.so sparse-convolution plugins (+ spconv/cumm)
-  # Consumers load the libraries they need; a process must never load two libraries that
-  # provide the same plugin name (e.g. this spconv library and a replacement for it).
+  # Consumers load the libraries they need.
   set(PLUGIN_LIBRARIES ${PROJECT_NAME})
 
   add_library(${PROJECT_NAME} SHARED
