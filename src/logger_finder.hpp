@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef AUTOWARE__TENSORRT_PLUGINS__LOGGER_FINDER_HPP_
-#define AUTOWARE__TENSORRT_PLUGINS__LOGGER_FINDER_HPP_
+#ifndef LOGGER_FINDER_HPP_
+#define LOGGER_FINDER_HPP_
 
 #include <NvInferRuntime.h>
 
@@ -55,4 +55,4 @@ private:
 
 }  // namespace autoware::tensorrt_plugins
 
-#endif  // AUTOWARE__TENSORRT_PLUGINS__LOGGER_FINDER_HPP_
+#endif  // LOGGER_FINDER_HPP_

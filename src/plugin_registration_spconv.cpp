@@ -19,7 +19,7 @@
 #include "autoware/tensorrt_plugins/get_indices_pairs_plugin_creator.hpp"
 #include "autoware/tensorrt_plugins/implicit_gemm_plugin_creator.hpp"
 #include "autoware/tensorrt_plugins/indice_conv_plugin_creator.hpp"
-#include "autoware/tensorrt_plugins/logger_finder.hpp"
+#include "logger_finder.hpp"
 #include "autoware/tensorrt_plugins/plugin_registration.hpp"
 
 #include <NvInferRuntime.h>

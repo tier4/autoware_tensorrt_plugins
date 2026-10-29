@@ -198,6 +198,22 @@ if(TRT_AVAIL AND CUDA_AVAIL)
       )
       target_compile_definitions(reference_kernels_test PRIVATE _GLIBCXX_USE_CXX11_ABI=1)
     endif()
+
+    # Loads the built libraries through dlopen and checks which plugins each provides.
+    ament_add_gtest(plugin_libraries_test test/plugin_libraries_test.cpp)
+    if(TARGET plugin_libraries_test)
+      add_dependencies(plugin_libraries_test ${PLUGIN_LIBRARIES})
+      target_link_libraries(plugin_libraries_test ${CMAKE_DL_LIBS})
+      target_compile_definitions(plugin_libraries_test PRIVATE
+        _GLIBCXX_USE_CXX11_ABI=1
+        CORE_PLUGIN_LIBRARY="$<TARGET_FILE:${PROJECT_NAME}>"
+      )
+      if(SPCONV_AVAIL)
+        target_compile_definitions(plugin_libraries_test PRIVATE
+          SPCONV_PLUGIN_LIBRARY="$<TARGET_FILE:${PROJECT_NAME}_spconv>"
+        )
+      endif()
+    endif()
   endif()
 
   install(

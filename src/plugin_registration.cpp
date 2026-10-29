@@ -18,7 +18,7 @@
 #include "autoware/tensorrt_plugins/plugin_registration.hpp"
 
 #include "autoware/tensorrt_plugins/argsort_plugin_creator.hpp"
-#include "autoware/tensorrt_plugins/logger_finder.hpp"
+#include "logger_finder.hpp"
 #include "autoware/tensorrt_plugins/multi_scale_deformable_attention_plugin_creator.hpp"
 #include "autoware/tensorrt_plugins/quick_cumsum_cuda_plugin_creator.hpp"
 #include "autoware/tensorrt_plugins/rotate_plugin_creator.hpp"
