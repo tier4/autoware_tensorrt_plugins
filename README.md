@@ -4,6 +4,19 @@
 
 The `autoware_tensorrt_plugins` package extends the operations available in TensorRT via plugins.
 
+## Libraries
+
+The plugins are built into two shared libraries, split by external dependency, and installed to `share/autoware_tensorrt_plugins/plugins/`:
+
+| Library                                  | Plugins                                                                                                                                 | Dependencies           |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| `libautoware_tensorrt_plugins.so`        | `Argsort`, `QuickCumsumCuda`, `SegmentCSR`, `CustomUnique`, `MultiScaleDeformableAttentionPlugin`, `RotatePlugin`, `SelectAndPadPlugin` | CUDA runtime, TensorRT |
+| `libautoware_tensorrt_plugins_spconv.so` | `GetIndicePairs`, `GetIndicePairsImplicitGemm`, `ImplicitGemm`, `IndiceConv`                                                            | + `spconv`, `cumm`     |
+
+A process has to load all libraries its model needs.
+
+The spconv library is only built when `spconv` and `cumm` are found at configure time.
+
 ## Algorithms
 
 The following operations are implemented:
