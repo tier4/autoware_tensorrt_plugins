@@ -29,6 +29,7 @@
 #include <NvInferRuntime.h>
 
 #include <cstdint>
+#include <iterator>
 
 namespace
 {
@@ -59,7 +60,6 @@ extern "C" nvinfer1::IPluginCreatorInterface * const * getCreators(std::int32_t 
     &segment_csr_plugin_creator,
     &select_and_pad_plugin_creator,
     &unique_plugin_creator};
-  num_creators =
-    static_cast<std::int32_t>(sizeof(plugin_creator_list) / sizeof(plugin_creator_list[0]));
+  num_creators = static_cast<std::int32_t>(std::size(plugin_creator_list));
   return plugin_creator_list;
 }

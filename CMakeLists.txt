@@ -57,7 +57,7 @@ if(${cumm_FOUND} AND ${spconv_FOUND})
   message(STATUS "spconv is available!")
   set(SPCONV_AVAIL ON)
 else()
-  message(WARNING "spconv is NOT available")
+  message(WARNING "spconv is NOT available: the sparse convolution plugins will not be built")
   set(SPCONV_AVAIL OFF)
 endif()
 
@@ -165,8 +165,6 @@ if(TRT_AVAIL AND CUDA_AVAIL)
     )
 
     list(APPEND PLUGIN_LIBRARIES ${PROJECT_NAME}_spconv)
-  else()
-    message(WARNING "spconv is NOT available: the sparse convolution plugins will not be built")
   endif()
 
   foreach(plugin_library IN LISTS PLUGIN_LIBRARIES)

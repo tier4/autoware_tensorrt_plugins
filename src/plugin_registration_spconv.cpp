@@ -1,4 +1,4 @@
-// Copyright 2025 TIER IV, Inc.
+// Copyright 2026 TIER IV, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 #include <NvInferRuntime.h>
 
 #include <cstdint>
+#include <iterator>
 
 namespace
 {
@@ -48,7 +49,6 @@ extern "C" nvinfer1::IPluginCreatorInterface * const * getCreators(std::int32_t 
   static nvinfer1::IPluginCreatorInterface * const plugin_creator_list[] = {
     &get_indices_pairs_implicit_gemm_plugin_creator, &get_indices_pairs_plugin_creator,
     &implicit_gemm_plugin_creator, &indice_conv_plugin_creator};
-  num_creators =
-    static_cast<std::int32_t>(sizeof(plugin_creator_list) / sizeof(plugin_creator_list[0]));
+  num_creators = static_cast<std::int32_t>(std::size(plugin_creator_list));
   return plugin_creator_list;
 }
