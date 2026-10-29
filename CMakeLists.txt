@@ -5,6 +5,11 @@ find_package(autoware_cmake REQUIRED)
 autoware_package()
 
 add_compile_options(-Wno-deprecated-declarations)
+# Objects compiled by nvcc must not take part in link-time optimization (this used to come
+# from autoware_cuda_dependency_meta). FindCUDA forwards CMAKE_<LANG>_FLAGS, not
+# add_compile_options(), to the nvcc host compiler, so the flag has to go there.
+string(APPEND CMAKE_C_FLAGS " -fno-lto")
+string(APPEND CMAKE_CXX_FLAGS " -fno-lto")
 
 option(CUDA_VERBOSE "Verbose output of CUDA modules" OFF)
 
@@ -192,7 +197,6 @@ if(TRT_AVAIL AND CUDA_AVAIL)
       target_include_directories(reference_kernels_test PRIVATE
         include
         test
-        ${autoware_cuda_utils_INCLUDE_DIRS}
         ${CUDA_INCLUDE_DIRS}
       )
       target_compile_definitions(reference_kernels_test PRIVATE _GLIBCXX_USE_CXX11_ABI=1)
