@@ -10,7 +10,7 @@ The plugins are built into two shared libraries, split by external dependency, a
 
 | Library                                  | Plugins                                                                                                                                 | Dependencies           |
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| `libautoware_tensorrt_plugins.so`        | `Argsort`, `QuickCumsumCuda`, `SegmentCSR`, `CustomUnique`, `MultiScaleDeformableAttentionPlugin`, `RotatePlugin`, `SelectAndPadPlugin` | CUDA runtime, TensorRT |
+| `libautoware_tensorrt_plugins.so`        | `Argsort`, `QuickCumsumCuda`, `SegmentCSR`, `CustomUnique`, `MultiScaleDeformableAttentionPlugin`, `RotatePlugin`, `SelectAndPadPlugin`, `SparseDeformableAggregation` | CUDA runtime, TensorRT |
 | `libautoware_tensorrt_plugins_spconv.so` | `GetIndicePairs`, `GetIndicePairsImplicitGemm`, `ImplicitGemm`, `IndiceConv`                                                            | + `spconv`, `cumm`     |
 
 A process has to load all libraries its model needs.
@@ -154,6 +154,28 @@ The `SelectAndPadPlugin` enables conditional selection and padding of tensor ele
 **Parameters:**
 
 - `P`: Fixed output size for padding
+
+### Sparse Deformable Aggregation
+
+The `SparseDeformableAggregation` plugin aggregates sparse voxel features at the keypoints of query anchors, as the deformable aggregation of a Sparse4D head over sparse encoder stages. Every keypoint interpolates trilinearly between the 8 voxels around it on every stage, empty voxels read zeros. The samples are summed with their weights per feature group and divided by the weight that landed on occupied voxels. One CUDA block handles one anchor, so the samples never leave on-chip memory.
+
+**Inputs:**
+
+1. `key_points`: Metric keypoints (B, N, P, 3)
+2. `weights`: Softmaxed sampling weights (B, N, L \* P, G), level major
+3. `features`: L tensors, the features of every stage (V + 1, C) with a zero first row
+4. `grids`: L int32 tensors, the dense cell grid of every stage (X \* Y \* Z) holding the feature row of every cell and 0 for an empty cell
+
+**Output:**
+
+- Aggregated features (B, N, C)
+
+**Parameters:**
+
+- `grid_dims`: Cells of the dense grid of every stage, (x, y, z) per stage
+- `voxel_sizes`: Metric voxel size of every stage
+- `grid_origin`: Metric origin of the grids
+- `min_occupancy`: Smallest occupied weight the sum is divided by
 
 ## Licenses
 

@@ -87,6 +87,7 @@ add_library(cuda_ops STATIC
   src/multi_scale_deform_attn_ops/ms_deform_attn_kernel.cu
   src/rotate_ops/rotate_kernel.cu
   src/select_and_pad_ops/select_and_pad_kernel.cu
+  src/sparse_deformable_aggregation_ops/sparse_deformable_aggregation.cu
 )
 target_include_directories(cuda_ops PUBLIC include)
 target_link_libraries(cuda_ops PUBLIC CUDA::cudart PRIVATE plugin_build_options)
@@ -113,6 +114,8 @@ add_library(${PROJECT_NAME} SHARED
   src/segment_csr_plugin.cpp
   src/select_and_pad_plugin.cpp
   src/select_and_pad_plugin_creator.cpp
+  src/sparse_deformable_aggregation_plugin.cpp
+  src/sparse_deformable_aggregation_plugin_creator.cpp
   src/unique_plugin.cpp
   src/unique_plugin_creator.cpp
   src/plugin_registration.cpp
@@ -157,6 +160,7 @@ if(BUILD_TESTING)
     add_executable(reference_kernels_test
       test/argsort_kernel_test.cpp
       test/segment_csr_kernel_test.cpp
+      test/sparse_deformable_aggregation_kernel_test.cpp
       test/unique_kernel_test.cpp
     )
     target_include_directories(reference_kernels_test PRIVATE test)
