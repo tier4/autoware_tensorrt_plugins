@@ -16,6 +16,7 @@
 #include "cuda_gtest_utils.hpp"
 #include "test_utils.hpp"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
 
@@ -23,8 +24,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace
@@ -223,5 +226,213 @@ INSTANTIATE_TEST_SUITE_P(
     SegmentCsrCase{"EmptyInputEmptySegments", 0U, 2U, {}, {0, 0, 0}},
     SegmentCsrCase{"ZeroColumns", 3U, 0U, {}, {0, 1, 3}}),
   segment_csr_case_name);
+
+// The launcher picks the vectorized kernel when no arg output is requested, each row splits into
+// whole 16-byte chunks (num_cols a multiple of 8 for half, 4 for float) and src/out are 16-byte
+// aligned; otherwise it falls back to the per-element kernels. The cases below run every path for
+// half and float and compare bit by bit against a CPU reference that applies the reducer's update
+// rule in row order.
+
+struct SegmentCsrPathCase
+{
+  std::string name;
+  std::size_t cols;
+  std::size_t src_offset;  // in elements; 1 breaks the 16-byte alignment of src
+  std::size_t out_offset;  // in elements; 1 breaks the 16-byte alignment of out
+  bool with_arg;           // MAX only: request argmax indices
+};
+
+constexpr std::size_t kPathSegments = 300U;
+
+// Segment lengths cycle through empty segments and lengths around the kernel's 4-row unroll.
+std::vector<std::int64_t> make_path_indptr()
+{
+  const std::vector<std::int64_t> lengths{0, 1, 2, 3, 4, 5, 0, 9, 3, 0, 8};
+  std::vector<std::int64_t> indptr{0};
+  for (std::size_t segment = 0; segment < kPathSegments; ++segment) {
+    indptr.push_back(indptr.back() + lengths[segment % lengths.size()]);
+  }
+  return indptr;
+}
+
+// Small integers, so that sums are exact in half and float. With `with_specials`, column 1 is
+// NaN in every row, every third column is <= 0 with -0 before +0, and other cells are NaN, -0
+// or +0 at a fixed stride.
+float make_path_value(const std::size_t row, const std::size_t col, const bool with_specials)
+{
+  const auto pattern = static_cast<float>(static_cast<int>((row * 7U + col * 13U) % 17U) - 8);
+  if (!with_specials) {
+    return pattern;
+  }
+  if (col == 1U) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  if (col % 3U == 0U) {
+    return row % 4U == 1U ? -0.0F : (row % 4U == 2U ? 0.0F : -std::abs(pattern) - 1.0F);
+  }
+  switch ((row * 5U + col) % 11U) {
+    case 0U:
+      return std::numeric_limits<float>::quiet_NaN();
+    case 1U:
+      return -0.0F;
+    case 2U:
+      return 0.0F;
+    default:
+      return pattern;
+  }
+}
+
+template <typename T>
+T from_float(const float value)
+{
+  if constexpr (std::is_same_v<T, half>) {
+    return __float2half(value);
+  } else {
+    return value;
+  }
+}
+
+template <typename T>
+float to_float(const T value)
+{
+  if constexpr (std::is_same_v<T, half>) {
+    return __half2float(value);
+  } else {
+    return value;
+  }
+}
+
+// Same update rule as Reducer: MAX replaces the running value only on `new > current`, so NaN
+// never wins and -0 is kept over a later +0. A non-empty segment without a winner keeps the
+// reducer's init value (lowest for float, -inf for half); an empty segment yields 0.
+template <typename T, ReductionType REDUCE>
+void make_path_reference(
+  const std::vector<T> & src, const std::size_t num_rows, const std::size_t cols,
+  const std::vector<std::int64_t> & indptr, std::vector<T> & out, std::vector<std::int64_t> & arg)
+{
+  const float max_init = std::is_same_v<T, half> ? -std::numeric_limits<float>::infinity()
+                                                 : std::numeric_limits<float>::lowest();
+  out.assign((indptr.size() - 1U) * cols, from_float<T>(0.0F));
+  arg.assign(out.size(), static_cast<std::int64_t>(num_rows));
+  for (std::size_t segment = 0; segment + 1U < indptr.size(); ++segment) {
+    const auto start = static_cast<std::size_t>(indptr[segment]);
+    const auto end = static_cast<std::size_t>(indptr[segment + 1U]);
+    for (std::size_t col = 0; col < cols; ++col) {
+      float value = REDUCE == MAX ? max_init : 0.0F;
+      std::int64_t best = 0;
+      for (std::size_t row = start; row < end; ++row) {
+        const float element = to_float(src[row * cols + col]);
+        if (REDUCE == MAX) {
+          if (element > value) {
+            value = element;
+            best = static_cast<std::int64_t>(row);
+          }
+        } else {
+          value += element;
+        }
+      }
+      if (REDUCE == MEAN && end > start) {
+        value /= static_cast<float>(end - start);
+      }
+      if (end > start) {
+        out[segment * cols + col] = from_float<T>(value);
+        arg[segment * cols + col] = best;
+      }
+    }
+  }
+}
+
+template <typename T, ReductionType REDUCE>
+void run_segment_csr_path_case(const SegmentCsrPathCase & test_case)
+{
+  SKIP_TEST_IF_CUDA_UNAVAILABLE();
+
+  const bool with_arg = REDUCE == MAX && test_case.with_arg;
+  const auto indptr = make_path_indptr();
+  const auto num_rows = static_cast<std::size_t>(indptr.back());
+  const auto cols = test_case.cols;
+
+  std::vector<T> src(num_rows * cols);
+  for (std::size_t row = 0; row < num_rows; ++row) {
+    for (std::size_t col = 0; col < cols; ++col) {
+      src[row * cols + col] = from_float<T>(make_path_value(row, col, REDUCE == MAX));
+    }
+  }
+  std::vector<T> expected_out;
+  std::vector<std::int64_t> expected_arg;
+  make_path_reference<T, REDUCE>(src, num_rows, cols, indptr, expected_out, expected_arg);
+
+  CudaStreamGuard stream;
+  DeviceBuffer<T> src_d(src.size() + test_case.src_offset);
+  DeviceBuffer<std::int64_t> indptr_d(indptr.size());
+  DeviceBuffer<T> out_d(expected_out.size() + test_case.out_offset);
+  DeviceBuffer<std::int64_t> arg_d(expected_arg.size());
+  copy_to_device(src_d.get() + test_case.src_offset, src);
+  copy_to_device(indptr_d.get(), indptr);
+  // Poison the outputs: every cell must be written by the kernel.
+  ASSERT_EQ(
+    cudaMemset(out_d.get(), 0x7F, sizeof(T) * (expected_out.size() + test_case.out_offset)),
+    cudaSuccess);
+
+  ASSERT_EQ(
+    (segment_csr_launch<T, REDUCE>(
+      src_d.get() + test_case.src_offset, static_cast<std::int32_t>(num_rows),
+      static_cast<std::int32_t>(cols), indptr_d.get(), static_cast<std::int32_t>(indptr.size()),
+      out_d.get() + test_case.out_offset, with_arg ? arg_d.get() : nullptr, stream.get())),
+    0);
+  ASSERT_EQ(cudaStreamSynchronize(stream.get()), cudaSuccess);
+
+  const auto actual_out = copy_to_host(out_d.get() + test_case.out_offset, expected_out.size());
+  for (std::size_t index = 0; index < expected_out.size(); ++index) {
+    ASSERT_EQ(std::memcmp(&actual_out[index], &expected_out[index], sizeof(T)), 0)
+      << "index=" << index << " actual=" << to_float(actual_out[index])
+      << " expected=" << to_float(expected_out[index]);
+  }
+  if (with_arg) {
+    EXPECT_EQ(copy_to_host(arg_d.get(), expected_arg.size()), expected_arg);
+  }
+}
+
+class SegmentCsrPathTest : public ::testing::TestWithParam<SegmentCsrPathCase>
+{
+};
+
+TEST_P(SegmentCsrPathTest, HalfMaxIsBitExact)
+{
+  run_segment_csr_path_case<half, MAX>(GetParam());
+}
+
+TEST_P(SegmentCsrPathTest, FloatMaxIsBitExact)
+{
+  run_segment_csr_path_case<float, MAX>(GetParam());
+}
+
+TEST_P(SegmentCsrPathTest, HalfSumIsBitExact)
+{
+  run_segment_csr_path_case<half, SUM>(GetParam());
+}
+
+TEST_P(SegmentCsrPathTest, FloatMeanIsBitExact)
+{
+  run_segment_csr_path_case<float, MEAN>(GetParam());
+}
+
+std::string segment_csr_path_case_name(const testing::TestParamInfo<SegmentCsrPathCase> & info)
+{
+  return info.param.name;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  ReferenceKernelsTest, SegmentCsrPathTest,
+  testing::Values(
+    SegmentCsrPathCase{"Vectorized", 16U, 0U, 0U, false},
+    SegmentCsrPathCase{"VectorizedManyVectors", 2080U, 0U, 0U, false},
+    SegmentCsrPathCase{"VectorizedOddVectorCount", 24U, 0U, 0U, false},
+    SegmentCsrPathCase{"MisalignedSrcFallback", 16U, 1U, 0U, false},
+    SegmentCsrPathCase{"MisalignedOutFallback", 16U, 0U, 1U, false},
+    SegmentCsrPathCase{"OddColumnsFallback", 7U, 0U, 0U, false},
+    SegmentCsrPathCase{"SingleColumn", 1U, 0U, 0U, false},
+    SegmentCsrPathCase{"ArgOutputFallback", 16U, 0U, 0U, true}),
+  segment_csr_path_case_name);
 
 }  // namespace

@@ -24,6 +24,7 @@
 #include "autoware/scatter_ops/utils.cuh"
 
 #include <algorithm>
+#include <cstdint>
 #include <string>
 
 #define THREADS 256
@@ -41,6 +42,10 @@
   SEGMENT_CSR_LAUNCH_INSTANTIATION_TR(T, ReductionType::DIV)  \
   SEGMENT_CSR_LAUNCH_INSTANTIATION_TR(T, ReductionType::MIN)  \
   SEGMENT_CSR_LAUNCH_INSTANTIATION_TR(T, ReductionType::MAX)
+
+// Number of scalar_t values in one 16-byte load or store.
+template <typename scalar_t>
+constexpr int kVecSize = sizeof(uint4) / sizeof(scalar_t);
 
 template <typename scalar_t, ReductionType REDUCE, int TB>
 __global__ void segment_csr_kernel(
@@ -111,6 +116,56 @@ __global__ void segment_csr_broadcast_kernel(
     Reducer<scalar_t, REDUCE>::write(reduced_values_out + thread_idx, val, row_end - row_start);
 }
 
+// segment_csr_broadcast_kernel without arg output, reading and writing 16 bytes (8 half or 4 float
+// channels) at a time. Thread (x, y) of a block handles segment blockIdx.x * blockDim.y + y and
+// the 16-byte chunks x, x + blockDim.x, ... of that segment's channels. Each channel takes the
+// same Reducer::update calls in the same row order, so the output has the same bits (float MUL
+// may give a NaN with a different payload).
+template <typename scalar_t, ReductionType REDUCE>
+__global__ void segment_csr_broadcast_vec_kernel(
+  const scalar_t * __restrict__ src_in, const int64_t * __restrict__ indptr_in,
+  scalar_t * __restrict__ reduced_values_out, int64_t num_segments_in, int32_t num_vecs_in)
+{
+  constexpr int kRowsInFlight = 4;
+  const int64_t segment = static_cast<int64_t>(blockIdx.x) * blockDim.y + threadIdx.y;
+  if (segment >= num_segments_in) return;
+
+  const int64_t row_start = __ldg(indptr_in + segment);
+  const int64_t row_end = __ldg(indptr_in + segment + 1);
+  const auto * src = reinterpret_cast<const uint4 *>(src_in);
+  auto * out = reinterpret_cast<uint4 *>(reduced_values_out) + segment * num_vecs_in;
+
+  for (int32_t vec = threadIdx.x; vec < num_vecs_in; vec += blockDim.x) {
+    scalar_t val[kVecSize<scalar_t>];
+#pragma unroll
+    for (int channel = 0; channel < kVecSize<scalar_t>; channel++)
+      val[channel] = Reducer<scalar_t, REDUCE>::init();
+
+    for (int64_t row = row_start; row < row_end; row += kRowsInFlight) {
+      uint4 pack[kRowsInFlight];
+#pragma unroll
+      for (int ahead = 0; ahead < kRowsInFlight; ahead++)
+        if (row + ahead < row_end) pack[ahead] = __ldg(src + (row + ahead) * num_vecs_in + vec);
+#pragma unroll
+      for (int ahead = 0; ahead < kRowsInFlight; ahead++)
+        if (row + ahead < row_end) {
+          const auto * values = reinterpret_cast<const scalar_t *>(&pack[ahead]);
+#pragma unroll
+          for (int channel = 0; channel < kVecSize<scalar_t>; channel++)
+            Reducer<scalar_t, REDUCE>::update(&val[channel], values[channel]);
+        }
+    }
+
+    uint4 result;
+    auto * reduced = reinterpret_cast<scalar_t *>(&result);
+#pragma unroll
+    for (int channel = 0; channel < kVecSize<scalar_t>; channel++)
+      Reducer<scalar_t, REDUCE>::write(
+        reduced + channel, val[channel], static_cast<int>(row_end - row_start));
+    out[vec] = result;
+  }
+}
+
 //! \todo test different devices (cudaSetDevice(src.get_device());)
 //! \todo expand index
 template <typename scalar_t, ReductionType REDUCE>
@@ -126,20 +181,31 @@ int32_t segment_csr_launch(
 
   if (out_numel == 0) return 0;
 
+  // Every kernel writes every value cell, but not the arg cells of empty segments.
   if ((REDUCE == ReductionType::MIN || REDUCE == ReductionType::MAX) && arg_indices_out != nullptr)
     fill_kernel<int64_t>
       <<<BLOCKS(1, out_numel), THREADS, 0, stream_in>>>(arg_indices_out, out_numel, num_rows_in);
 
-  fill_kernel<scalar_t><<<BLOCKS(1, out_numel), THREADS, 0, stream_in>>>(
-    reduced_values_out, out_numel, static_cast<scalar_t>(0));
+  const bool vectorizable = arg_indices_out == nullptr && num_cols_in % kVecSize<scalar_t> == 0 &&
+                            reinterpret_cast<uintptr_t>(src_in) % sizeof(uint4) == 0 &&
+                            reinterpret_cast<uintptr_t>(reduced_values_out) % sizeof(uint4) == 0;
 
-  if (num_cols_in == 1)
+  if (vectorizable) {
+    const int32_t num_vecs = num_cols_in / kVecSize<scalar_t>;
+    const int32_t block_x = std::min<int32_t>(num_vecs, THREADS);
+    const int32_t block_y = THREADS / block_x;
+    const dim3 block(block_x, block_y);
+    const dim3 grid((num_segments + block_y - 1) / block_y);
+    segment_csr_broadcast_vec_kernel<scalar_t, REDUCE><<<grid, block, 0, stream_in>>>(
+      src_in, indptr_in, reduced_values_out, num_segments, num_vecs);
+  } else if (num_cols_in == 1) {
     segment_csr_kernel<scalar_t, REDUCE, 1><<<BLOCKS(32, num_segments), THREADS, 0, stream_in>>>(
       src_in, indptr_in, reduced_values_out, arg_indices_out, num_segments);
-  else
+  } else {
     segment_csr_broadcast_kernel<scalar_t, REDUCE>
       <<<BLOCKS(1, num_segments * num_cols_in), THREADS, 0, stream_in>>>(
         src_in, indptr_in, reduced_values_out, arg_indices_out, num_segments, num_cols_in);
+  }
   return 0;
 }
 
