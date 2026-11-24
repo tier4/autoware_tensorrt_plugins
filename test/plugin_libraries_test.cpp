@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Loads the built plugin libraries the way consumers do (dlopen) and checks which plugins
-// each one provides: the sets must match the documented split and be disjoint.
+// Checks which plugins each built library provides (the sets must match the documented
+// split and be disjoint) and that TensorRT's own loader, IPluginRegistry::loadLibrary,
+// registers them.
 
 #include <NvInferRuntime.h>
 #include <dlfcn.h>
@@ -30,8 +31,14 @@ namespace
 
 using GetCreatorsFn = nvinfer1::IPluginCreatorInterface * const * (*)(std::int32_t &);
 
-// The plugin libraries are never dlclose()d: their creators self-register with the global
-// TensorRT registry at load time and must outlive the process.
+// Whether the global TensorRT registry has a plugin of this name.
+bool is_registered(const std::string & plugin_name)
+{
+  return getPluginRegistry()->getCreator(plugin_name.c_str(), "1", "") != nullptr;
+}
+
+// Reads the plugin names from the library's getCreators. Opening a library registers
+// nothing, so it is left open.
 std::set<std::string> plugin_names_of(const char * library_path)
 {
   void * handle = dlopen(library_path, RTLD_NOW | RTLD_LOCAL);
@@ -56,6 +63,9 @@ std::set<std::string> plugin_names_of(const char * library_path)
     EXPECT_STREQ(info.kind, "PLUGIN CREATOR_V3ONE");
     auto * creator = static_cast<nvinfer1::IPluginCreatorV3One *>(creators[i]);
     EXPECT_STREQ(creator->getPluginNamespace(), "");
+    EXPECT_STREQ(creator->getPluginVersion(), "1");
+    EXPECT_FALSE(is_registered(creator->getPluginName()))
+      << creator->getPluginName() << " is registered although its library was only opened";
     EXPECT_TRUE(names.insert(creator->getPluginName()).second)
       << "duplicate plugin name " << creator->getPluginName();
   }
@@ -74,7 +84,31 @@ const std::set<std::string> kCORE_PLUGINS{
 const std::set<std::string> kSPCONV_PLUGINS{
   "GetIndicePairs", "GetIndicePairsImplicitGemm", "ImplicitGemm", "IndiceConv"};
 
+// Loads a library the way consumers do and checks that exactly then its plugins are
+// registered.
+void expect_registered_while_loaded(
+  const char * library_path, const std::set<std::string> & plugins)
+{
+  nvinfer1::IPluginRegistry * registry = getPluginRegistry();
+  const nvinfer1::IPluginRegistry::PluginLibraryHandle handle =
+    registry->loadLibrary(library_path);
+  ASSERT_NE(handle, nullptr) << "loadLibrary(" << library_path << ")";
+  for (const std::string & plugin : plugins) {
+    EXPECT_TRUE(is_registered(plugin)) << plugin;
+  }
+
+  registry->deregisterLibrary(handle);
+  for (const std::string & plugin : plugins) {
+    EXPECT_FALSE(is_registered(plugin)) << plugin;
+  }
+}
+
 }  // namespace
+
+TEST(PluginLibrariesTest, CoreLibraryLoadsThroughTheRegistry)
+{
+  expect_registered_while_loaded(CORE_PLUGIN_LIBRARY, kCORE_PLUGINS);
+}
 
 TEST(PluginLibrariesTest, CoreLibraryProvidesTheCudaOnlyPlugins)
 {
@@ -82,6 +116,11 @@ TEST(PluginLibrariesTest, CoreLibraryProvidesTheCudaOnlyPlugins)
 }
 
 #ifdef SPCONV_PLUGIN_LIBRARY
+TEST(PluginLibrariesTest, SpconvLibraryLoadsThroughTheRegistry)
+{
+  expect_registered_while_loaded(SPCONV_PLUGIN_LIBRARY, kSPCONV_PLUGINS);
+}
+
 TEST(PluginLibrariesTest, SpconvLibraryProvidesTheSparseConvolutionPlugins)
 {
   EXPECT_EQ(plugin_names_of(SPCONV_PLUGIN_LIBRARY), kSPCONV_PLUGINS);

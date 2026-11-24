@@ -29,8 +29,6 @@
 namespace nvinfer1::plugin
 {
 
-REGISTER_TENSORRT_PLUGIN(GetIndicesPairsPluginCreator);
-
 GetIndicesPairsPluginCreator::GetIndicesPairsPluginCreator()
 {
   plugin_attributes_.clear();

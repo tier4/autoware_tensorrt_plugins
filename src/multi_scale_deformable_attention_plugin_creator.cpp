@@ -24,8 +24,6 @@
 namespace autoware::tensorrt_plugins
 {
 
-REGISTER_TENSORRT_PLUGIN(MultiScaleDeformableAttentionPluginCreator);
-
 MultiScaleDeformableAttentionPluginCreator::MultiScaleDeformableAttentionPluginCreator()
 {
   plugin_attributes_.clear();

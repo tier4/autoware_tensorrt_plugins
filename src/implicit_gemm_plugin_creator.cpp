@@ -29,8 +29,6 @@
 namespace nvinfer1::plugin
 {
 
-REGISTER_TENSORRT_PLUGIN(ImplicitGemmPluginCreator);
-
 ImplicitGemmPluginCreator::ImplicitGemmPluginCreator()
 {
   plugin_attributes_.clear();

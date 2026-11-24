@@ -28,8 +28,6 @@
 namespace nvinfer1::plugin
 {
 
-REGISTER_TENSORRT_PLUGIN(QuickCumsumCudaPluginCreator);
-
 QuickCumsumCudaPluginCreator::QuickCumsumCudaPluginCreator()
 {
   plugin_attributes_.clear();

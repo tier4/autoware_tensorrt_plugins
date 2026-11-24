@@ -23,8 +23,6 @@
 namespace nvinfer1::plugin
 {
 
-REGISTER_TENSORRT_PLUGIN(UniquePluginCreator);
-
 UniquePluginCreator::UniquePluginCreator()
 {
   plugin_attributes_.clear();

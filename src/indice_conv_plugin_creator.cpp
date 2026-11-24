@@ -30,8 +30,6 @@ namespace nvinfer1::plugin
 {
 
 // cSpell:ignore Indice
-REGISTER_TENSORRT_PLUGIN(IndiceConvPluginCreator);
-
 IndiceConvPluginCreator::IndiceConvPluginCreator()
 {
   plugin_attributes_.clear();

@@ -25,8 +25,6 @@
 namespace autoware::tensorrt_plugins
 {
 
-REGISTER_TENSORRT_PLUGIN(RotatePluginCreator);
-
 RotatePluginCreator::RotatePluginCreator()
 {
   plugin_attributes_.clear();

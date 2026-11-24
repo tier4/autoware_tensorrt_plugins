@@ -20,9 +20,10 @@
 #include <cstdint>
 
 // Entry points TensorRT looks up in a plugin shared library
-// (IPluginRegistry::loadLibrary). Every plugin library built from this package
-// exports its own pair; the symbols are kept visible explicitly because the
-// libraries are otherwise built with hidden visibility.
+// (IPluginRegistry::loadLibrary), which is the only way the plugins get
+// registered. Every plugin library built from this package exports its own
+// pair; the symbols are kept visible explicitly because the libraries are
+// otherwise built with hidden visibility.
 
 #define AUTOWARE_TENSORRT_PLUGINS_EXPORT __attribute__((visibility("default")))
 

@@ -25,8 +25,6 @@
 namespace autoware::tensorrt_plugins
 {
 
-REGISTER_TENSORRT_PLUGIN(SelectAndPadPluginCreator);
-
 SelectAndPadPluginCreator::SelectAndPadPluginCreator()
 {
   plugin_attributes_.clear();
