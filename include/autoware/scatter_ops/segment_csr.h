@@ -44,6 +44,9 @@
 ///   reductions it points to `num_segments * num_cols_in` int64 values. Pass `nullptr` for SUM,
 ///   MEAN, MUL, and DIV, or when argmin/argmax indices are not needed.
 /// - All pointers are device pointers.
+/// - `scalar_t` is `float` or `half` for every reduction, and `std::int8_t` or `Float8E4M3` for MIN
+///   and MAX. For quantized values those two need no scale: with one positive scale on input and
+///   output, the MIN or MAX of the quantized values is the quantized MIN or MAX.
 ///
 /// Output contract:
 /// - Returns `0` if all work was enqueued successfully, or `-1` if any size argument is negative.

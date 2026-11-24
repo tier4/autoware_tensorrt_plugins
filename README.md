@@ -77,6 +77,18 @@ Each output row reduces the contiguous source rows `src[indptr[s] : indptr[s + 1
 for every column. Higher-rank/batched CSR inputs are not part of this plugin contract; callers
 should flatten or reshape inputs before invoking the plugin.
 
+Element types:
+
+| `src` and `output` | Reductions |
+| ------------------ | ---------- |
+| FP32, FP16         | all        |
+| INT8, FP8 (E4M3)   | min, max   |
+
+Min and max of quantized features need no scale, so the plugin has no scale attribute: place a
+`QuantizeLinear` before the node and a `DequantizeLinear` with the same scale after it. Without
+argmin/argmax output, the kernel reads and writes 16 bytes at a time when the column count is a
+multiple of 4 (FP32), 8 (FP16) or 16 (INT8, FP8).
+
 ### Unique
 
 While ONNX supports the unique operation, TensorRT does not provide an implementation. For this reason we implement `Unique` as `CustomUnique` to avoid name classes.

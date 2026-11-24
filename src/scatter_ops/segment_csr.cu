@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 
 #define THREADS 256
 #define BLOCKS(TB, N) (TB * N + THREADS - 1) / THREADS
@@ -116,8 +117,52 @@ __global__ void segment_csr_broadcast_kernel(
     Reducer<scalar_t, REDUCE>::write(reduced_values_out + thread_idx, val, row_end - row_start);
 }
 
-// segment_csr_broadcast_kernel without arg output, on 16 bytes (8 half or 4 float channels) at a
-// time: one thread per segment and 16-byte chunk.
+// Float8E4M3 in the vectorized kernel: the 16 bytes are turned into their order() values with one
+// xor per word, reduced as int8 and turned back with the same xor. NaN bytes become the reduction's
+// start value on the way in, so they never win, as in the scalar kernels.
+__device__ inline unsigned int e4m3_order_word(const unsigned int word)
+{
+  return word ^ (((word >> 7U) & 0x01010101U) * 0x7FU);
+}
+
+template <ReductionType REDUCE>
+__device__ inline unsigned int e4m3_ordered_without_nan(const unsigned int word)
+{
+  // 0x80 in every byte whose low seven bits are all set
+  const unsigned int not_magnitude = ~word & 0x7F7F7F7FU;
+  const unsigned int nan = ~((not_magnitude + 0x7F7F7F7FU) | 0x7F7F7F7FU);
+  const unsigned int nan_bytes = (nan >> 7U) * 0xFFU;
+  // order() of Reducer<Float8E4M3, REDUCE>::init(): -448 for MAX, 448 for MIN
+  const unsigned int start = REDUCE == MAX ? 0x81818181U : 0x7E7E7E7EU;
+  return (e4m3_order_word(word) & ~nan_bytes) | (start & nan_bytes);
+}
+
+template <typename scalar_t, ReductionType REDUCE>
+__device__ inline uint4 to_reduced_type(const uint4 pack)
+{
+  if constexpr (std::is_same<scalar_t, Float8E4M3>::value) {
+    return make_uint4(
+      e4m3_ordered_without_nan<REDUCE>(pack.x), e4m3_ordered_without_nan<REDUCE>(pack.y),
+      e4m3_ordered_without_nan<REDUCE>(pack.z), e4m3_ordered_without_nan<REDUCE>(pack.w));
+  } else {
+    return pack;
+  }
+}
+
+template <typename scalar_t>
+__device__ inline uint4 from_reduced_type(const uint4 pack)
+{
+  if constexpr (std::is_same<scalar_t, Float8E4M3>::value) {
+    return make_uint4(
+      e4m3_order_word(pack.x), e4m3_order_word(pack.y), e4m3_order_word(pack.z),
+      e4m3_order_word(pack.w));
+  } else {
+    return pack;
+  }
+}
+
+// segment_csr_broadcast_kernel without arg output, on 16 bytes (4 float, 8 half or 16 8-bit
+// channels) at a time: one thread per segment and 16-byte chunk.
 template <typename scalar_t, ReductionType REDUCE>
 __global__ void segment_csr_broadcast_vec_kernel(
   const scalar_t * __restrict__ src_in, const int64_t * __restrict__ indptr_in,
@@ -132,10 +177,13 @@ __global__ void segment_csr_broadcast_vec_kernel(
   const auto * src = reinterpret_cast<const uint4 *>(src_in);
   auto * out = reinterpret_cast<uint4 *>(reduced_values_out) + segment * num_vecs_in;
 
+  // Float8E4M3 is reduced as the int8 of its order(); every other type as itself.
+  using reduced_t = std::conditional_t<std::is_same<scalar_t, Float8E4M3>::value, std::int8_t, scalar_t>;
+
   for (int32_t vec = threadIdx.x; vec < num_vecs_in; vec += blockDim.x) {
-    scalar_t val[kVecSize<scalar_t>];
+    reduced_t val[kVecSize<scalar_t>];
     for (int channel = 0; channel < kVecSize<scalar_t>; ++channel) {
-      val[channel] = Reducer<scalar_t, REDUCE>::init();
+      val[channel] = Reducer<reduced_t, REDUCE>::init();
     }
 
     for (int64_t row = row_start; row < row_end; row += kRowsInFlight) {
@@ -145,21 +193,22 @@ __global__ void segment_csr_broadcast_vec_kernel(
       }
       for (int ahead = 0; ahead < kRowsInFlight; ++ahead) {
         if (row + ahead < row_end) {
-          const auto * values = reinterpret_cast<const scalar_t *>(&pack[ahead]);
+          const uint4 ordered = to_reduced_type<scalar_t, REDUCE>(pack[ahead]);
+          const auto * values = reinterpret_cast<const reduced_t *>(&ordered);
           for (int channel = 0; channel < kVecSize<scalar_t>; ++channel) {
-            Reducer<scalar_t, REDUCE>::update(&val[channel], values[channel]);
+            Reducer<reduced_t, REDUCE>::update(&val[channel], values[channel]);
           }
         }
       }
     }
 
     uint4 result{};
-    auto * reduced = reinterpret_cast<scalar_t *>(&result);
+    auto * reduced = reinterpret_cast<reduced_t *>(&result);
     for (int channel = 0; channel < kVecSize<scalar_t>; ++channel) {
-      Reducer<scalar_t, REDUCE>::write(
+      Reducer<reduced_t, REDUCE>::write(
         reduced + channel, val[channel], static_cast<int>(row_end - row_start));
     }
-    out[vec] = result;
+    out[vec] = from_reduced_type<scalar_t>(result);
   }
 }
 
@@ -211,3 +260,9 @@ int32_t segment_csr_launch(
 
 SEGMENT_CSR_LAUNCH_INSTANTIATION(half)
 SEGMENT_CSR_LAUNCH_INSTANTIATION(float)
+// 8-bit elements, for quantized features: MIN and MAX only. 16 channels per 16-byte vector.
+#define SEGMENT_CSR_LAUNCH_INSTANTIATION_MIN_MAX(T)          \
+  SEGMENT_CSR_LAUNCH_INSTANTIATION_TR(T, ReductionType::MIN) \
+  SEGMENT_CSR_LAUNCH_INSTANTIATION_TR(T, ReductionType::MAX)
+SEGMENT_CSR_LAUNCH_INSTANTIATION_MIN_MAX(std::int8_t)
+SEGMENT_CSR_LAUNCH_INSTANTIATION_MIN_MAX(Float8E4M3)

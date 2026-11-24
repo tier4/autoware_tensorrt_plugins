@@ -21,10 +21,40 @@
 #ifndef AUTOWARE__SCATTER_OPS__REDUCTION_H_
 #define AUTOWARE__SCATTER_OPS__REDUCTION_H_
 
+#include <cstdint>
 #include <map>
 #include <string>
 
 enum ReductionType { SUM, MEAN, MUL, DIV, MIN, MAX };
+
+/// One fp8 value (E4M3, TensorRT's `DataType::kFP8`), for MIN and MAX only.
+///
+/// E4M3 is sign-magnitude with the exponent above the mantissa, so two values compare like their
+/// sign and 7-bit magnitude and nothing has to be decoded. `order()` is that comparison as one
+/// int8: it is the value's byte with the low seven bits inverted when the sign is set, which puts
+/// -0 just below +0. NaN (0x7F, 0xFF) compares false with everything, as it does in the
+/// floating-point types.
+struct Float8E4M3
+{
+  std::uint8_t bits;
+
+  constexpr bool is_nan() const { return (bits & 0x7FU) == 0x7FU; }
+  constexpr std::int8_t order() const
+  {
+    const int magnitude = bits & 0x7FU;
+    return static_cast<std::int8_t>((bits & 0x80U) != 0U ? -1 - magnitude : magnitude);
+  }
+};
+
+constexpr bool operator<(const Float8E4M3 lhs, const Float8E4M3 rhs)
+{
+  return !lhs.is_nan() && !rhs.is_nan() && lhs.order() < rhs.order();
+}
+
+constexpr bool operator>(const Float8E4M3 lhs, const Float8E4M3 rhs)
+{
+  return rhs < lhs;
+}
 
 const std::map<std::string, ReductionType> reduce2REDUCE = {
   {"sum", SUM}, {"mean", MEAN}, {"mul", MUL}, {"div", DIV}, {"min", MIN}, {"max", MAX},
