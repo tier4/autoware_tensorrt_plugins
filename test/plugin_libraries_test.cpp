@@ -72,7 +72,8 @@ const std::set<std::string> kCORE_PLUGINS{
   "MultiScaleDeformableAttentionPlugin"};
 
 const std::set<std::string> kSPCONV_PLUGINS{
-  "GetIndicePairs", "GetIndicePairsImplicitGemm", "ImplicitGemm", "IndiceConv"};
+  "GetIndicePairs", "GetIndicePairsImplicitGemm", "ImplicitGemm", "IndiceConv",
+  "SubMRulebook",   "SubMConv"};
 
 }  // namespace
 

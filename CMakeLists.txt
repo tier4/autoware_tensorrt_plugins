@@ -126,6 +126,9 @@ if(BUILD_SPCONV_PLUGINS)
     src/indice_conv_plugin.cpp
     src/plugin_registration_spconv.cpp
     src/plugin_utils.cpp
+    src/subm_contract.cpp
+    src/subm_ops/convert_bias.cu
+    src/subm_plugins.cpp
   )
   target_compile_definitions(${PROJECT_NAME}_spconv PRIVATE TV_CUDA)
   target_link_libraries(${PROJECT_NAME}_spconv PRIVATE TensorRT::nvinfer CUDA::cudart spconv::spconv)
@@ -169,6 +172,13 @@ if(BUILD_TESTING)
         SPCONV_PLUGIN_LIBRARY="$<TARGET_FILE:${PROJECT_NAME}_spconv>")
     endif()
     add_test(NAME plugin_libraries_test COMMAND plugin_libraries_test)
+
+    # The SubMConv node contract: tensors and attributes only, so no device and no spconv.
+    add_executable(subm_contract_test test/subm_contract_test.cpp src/subm_contract.cpp)
+    target_include_directories(subm_contract_test PRIVATE include)
+    target_link_libraries(subm_contract_test PRIVATE
+      TensorRT::nvinfer GTest::gtest_main plugin_build_options)
+    add_test(NAME subm_contract_test COMMAND subm_contract_test)
   else()
     message(WARNING "GTest not found: tests will not be built")
   endif()
