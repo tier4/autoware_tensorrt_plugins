@@ -11,7 +11,7 @@ Changelog for package autoware_tensorrt_plugins
 * build: make the package a plain CMake project without ROS/ament dependencies (`#3 <https://github.com/tier4/autoware_tensorrt_plugins/issues/3>`_)
   * ament_cmake is used only when available, to register the package in the ament index; the install layout is unchanged
 * perf(segment_csr): vectorized arg-free kernel, drop the redundant value fill (`#5 <https://github.com/tier4/autoware_tensorrt_plugins/issues/5>`_)
-* build: take the project version from package.xml
+* build: declare the project version in CMake
 * chore: move package contents to repository root
 * Contributors: Jonna Matthiesen, Max Schmeller
 
