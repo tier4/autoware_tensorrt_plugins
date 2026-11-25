@@ -1,9 +1,17 @@
 cmake_minimum_required(VERSION 3.22)
 
+# package.xml is the single source of truth for the version (catkin_prepare_release bumps it).
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/package.xml" package_xml)
+if(NOT package_xml MATCHES "<version>([0-9]+\\.[0-9]+\\.[0-9]+)</version>")
+  message(FATAL_ERROR "Could not read the package version from package.xml")
+endif()
+set(package_version ${CMAKE_MATCH_1})
+unset(package_xml)
+
 # Plain CMake project: builds in a bare CUDA + TensorRT environment without ROS, ament or
 # colcon. When ament_cmake is available (a ROS 2 environment), ament_package() additionally
 # registers the package in the ament index so ROS 2 nodes locate it via the usual lookup.
-project(autoware_tensorrt_plugins LANGUAGES CXX)
+project(autoware_tensorrt_plugins VERSION ${package_version} LANGUAGES CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
