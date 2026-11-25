@@ -2,8 +2,8 @@
 Changelog for package autoware_tensorrt_plugins
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+1.0.0 (2026-11-25)
+------------------
 * First release from the standalone repository, versioned independently of autoware_universe
 * feat!: split the plugins into spconv and spconv-free shared libraries (`#1 <https://github.com/tier4/autoware_tensorrt_plugins/issues/1>`_)
   * libautoware_tensorrt_plugins.so holds the plugins that need only CUDA and TensorRT; the sparse-convolution plugins moved to libautoware_tensorrt_plugins_spconv.so, built only when spconv is found
