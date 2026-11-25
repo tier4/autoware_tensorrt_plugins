@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.22)
 # Plain CMake project: builds in a bare CUDA + TensorRT environment without ROS, ament or
 # colcon. When ament_cmake is available (a ROS 2 environment), ament_package() additionally
 # registers the package in the ament index so ROS 2 nodes locate it via the usual lookup.
-project(autoware_tensorrt_plugins LANGUAGES CXX)
+# Keep VERSION in sync with package.xml.
+project(autoware_tensorrt_plugins VERSION 1.0.0 LANGUAGES CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
