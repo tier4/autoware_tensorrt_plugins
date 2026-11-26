@@ -21,6 +21,7 @@
 #include "autoware/tensorrt_plugins/indice_conv_plugin_creator.hpp"
 #include "logger_finder.hpp"
 #include "autoware/tensorrt_plugins/plugin_registration.hpp"
+#include "autoware/tensorrt_plugins/subm_plugin_creators.hpp"
 
 #include <NvInferRuntime.h>
 
@@ -48,7 +49,9 @@ extern "C" nvinfer1::IPluginCreatorInterface * const * getCreators(std::int32_t 
 
   static nvinfer1::IPluginCreatorInterface * const plugin_creator_list[] = {
     &get_indices_pairs_implicit_gemm_plugin_creator, &get_indices_pairs_plugin_creator,
-    &implicit_gemm_plugin_creator, &indice_conv_plugin_creator};
+    &implicit_gemm_plugin_creator, &indice_conv_plugin_creator,
+    autoware::tensorrt_plugins::subm_rulebook_creator(),
+    autoware::tensorrt_plugins::subm_conv_creator()};
   num_creators = static_cast<std::int32_t>(std::size(plugin_creator_list));
   return plugin_creator_list;
 }

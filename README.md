@@ -11,7 +11,7 @@ The plugins are built into two shared libraries, split by external dependency, a
 | Library                                  | Plugins                                                                                                                                 | Dependencies           |
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
 | `libautoware_tensorrt_plugins.so`        | `Argsort`, `QuickCumsumCuda`, `SegmentCSR`, `CustomUnique`, `MultiScaleDeformableAttentionPlugin`, `RotatePlugin`, `SelectAndPadPlugin` | CUDA runtime, TensorRT |
-| `libautoware_tensorrt_plugins_spconv.so` | `GetIndicePairs`, `GetIndicePairsImplicitGemm`, `ImplicitGemm`, `IndiceConv`                                                            | + `spconv`, `cumm`     |
+| `libautoware_tensorrt_plugins_spconv.so` | `GetIndicePairs`, `GetIndicePairsImplicitGemm`, `ImplicitGemm`, `IndiceConv`, `SubMRulebook`, `SubMConv`                                | + `spconv`, `cumm`     |
 
 A process has to load all libraries its model needs.
 
@@ -54,6 +54,48 @@ The following operations are implemented:
 
 We provide a wrapper for [spconv](https://github.com/traveller59/spconv) (please see the correspondent package for details about the algorithms involved).
 This requires the installation of `spconv_cpp` which is automatically installed in autoware's setup script. If needed, the user can also build and install it using the repository's [instructions](https://github.com/autowarefoundation/spconv_cpp).
+
+#### Submanifold convolution as `SubMRulebook` + `SubMConv`
+
+`SubMRulebook` and `SubMConv` are the node pair [t4sparse](https://github.com/tier4/t4sparse) defines for a submanifold sparse convolution. This library implements the same pair on spconv, so one exported graph builds against either library and a deployment picks one by the plugin library it loads:
+
+```yaml
+plugin_paths:
+  - $(find-pkg-share autoware_tensorrt_plugins)/plugins/libautoware_tensorrt_plugins.so
+  # one of:
+  - $(find-pkg-share autoware_tensorrt_plugins)/plugins/libautoware_tensorrt_plugins_spconv.so
+  - $(find-pkg-share t4sparse)/plugins/libt4sparse_trt_plugins.so
+```
+
+Load one of the two, never both: they register the same plugin names. An engine is built by one library and runs only with it; the ONNX file is what the two share.
+
+The node contract (inputs, scale attributes, modes, epilogue) is `include/autoware/tensorrt_plugins/subm_contract.hpp`, a copy of t4sparse's `src/trt/subm_contract.hpp`. The two copies have to stay in step.
+
+| Node           | Inputs                                                                                    | Attributes                                                                     | Outputs                                                                                               |
+| -------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `SubMRulebook` | `coords` int32 `[N, 4]`                                                                   | `kernel_size` ints `[3]`, `spatial_shape` ints `[3]`                           | `pairs` `[k0, k1, k2, P]`, `point_mask` `[N, 1]`, `mask_argsort` `[N]`, `tile_mask` `[P / 32]`, int32 |
+| `SubMConv`     | `features`, `weights`, the four rulebook tensors, `bias` `[C_out]` (float32 or float16) | `activation` (`none`, `relu`, `leaky_relu`), `act_alpha`, the scale attributes | features `[N, C_out]`                                                                                 |
+
+`P` is `N` rounded up to 256. The rulebook tensors have the contract's shapes and hold spconv's implicit-GEMM rulebook; `tile_mask` is zero. A rulebook is read only by the `SubMConv` nodes of the library that wrote it.
+
+With `input_scale` and `weight_scale` set, the features and weights are int8 and the node writes float16: `out = act(input_scale * weight_scale[n] * acc + bias[n])`. The `QuantizeLinear` in front of the node is an ordinary TensorRT layer.
+
+What a graph may use and still build against both libraries:
+
+| In the graph                                  | spconv (this library) | t4sparse                    |
+| --------------------------------------------- | --------------------- | --------------------------- |
+| float16 features                              | yes                   | yes                         |
+| int8 features, float16 output                 | yes                   | yes (built with `s8`)       |
+| float32 features                              | yes                   | no kernel                   |
+| bfloat16 or float8e4m3 features               | refused               | yes (built with the type)   |
+| an 8-bit output (`output_scale`)              | refused               | no kernel                   |
+| channel counts that are not multiples of 32   | yes                   | no kernel                   |
+| more than 512000 points                       | refused               | yes                         |
+| strided or non-submanifold sparse convolution | `ImplicitGemm` only   | not available               |
+
+A refusal is logged at engine build with the node name and the reason, for example `SubMConv conv0: output_scale is set; the spconv library writes no 8-bit output`.
+
+spconv sorts the rulebook by pair mask (`do_sort` of `GetIndicePairsImplicitGemm`). `SubMRulebook` has no such attribute: the sort is on, and `AUTOWARE_SUBM_RULEBOOK_SORT=0` in the environment of the engine build turns it off for that engine.
 
 ### Argsort
 
