@@ -69,6 +69,7 @@ const std::set<std::string> kCORE_PLUGINS{
   "CustomUnique",
   "RotatePlugin",
   "SelectAndPadPlugin",
+  "SparseDeformableAggregation",
   "MultiScaleDeformableAttentionPlugin"};
 
 const std::set<std::string> kSPCONV_PLUGINS{
