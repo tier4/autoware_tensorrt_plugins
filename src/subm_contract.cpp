@@ -116,10 +116,14 @@ Refusal layer_dims_refusal(const NodeInputs& inputs) {
 /// The rulebook's four tensors are functions of the point count N and the
 /// kernel. TensorRT gives the largest N the engine may see, and each tensor's
 /// largest shape has to be that function of it.
-Refusal rulebook_refusal(const NodeInputs& inputs, const LayerDims& layer) {
-  const auto max_points = static_cast<std::int32_t>(inputs.max_dims(Slot::kFeatures).d[0]);
-  const std::int32_t max_rows = padded_rows(max_points);
-  const std::int32_t max_tiles = max_rows / kMaskRows;
+Refusal rulebook_refusal(const NodeInputs& inputs, const LayerDims& layer, Rows rows) {
+  const Slot row_slot = rows == Rows::kFeatures ? Slot::kFeatures : Slot::kPointMask;
+  const auto max_points = static_cast<std::int32_t>(inputs.max_dims(row_slot).d[0]);
+  // A computed row count is a TensorRT size tensor, which no shape expression may do arithmetic
+  // on: SparseConv's pairs and tile_mask have M rows as they are, where SubMConv's are padded.
+  const bool padded = rows == Rows::kFeatures;
+  const std::int32_t max_rows = padded ? padded_rows(max_points) : max_points;
+  const std::int32_t max_tiles = padded ? max_rows / kMaskRows : max_points;
   const bool points_known = max_points > 0;
 
   /// Whether a tensor's largest extent on `axis` is `expected`.
@@ -286,7 +290,7 @@ Refusal type_refusal(const DataType* input_types, std::int32_t n_inputs, const S
 }
 
 Refusal refusal(const DynamicPluginTensorDesc* input_descs, std::int32_t n_inputs,
-                DataType output_type_given, const Scales& scales) {
+                DataType output_type_given, const Scales& scales, Rows rows) {
   // Types first: the same checks getOutputDataTypes made while the graph was built.
   DataType input_types[kInputs];
   for (std::int32_t position = 0; position < n_inputs && position < kInputs; ++position) {
@@ -309,7 +313,7 @@ Refusal refusal(const DynamicPluginTensorDesc* input_descs, std::int32_t n_input
   // Shapes, each against the layer the weights describe.
   if (auto why = layer_dims_refusal(inputs)) return why;
   const LayerDims layer = layer_dims_of(inputs.dims(Slot::kWeights));
-  if (auto why = rulebook_refusal(inputs, layer)) return why;
+  if (auto why = rulebook_refusal(inputs, layer, rows)) return why;
 
   const Dims& bias = inputs.dims(Slot::kBias);
   const bool bias_is_per_channel = bias.nbDims == 1 && bias.d[0] == layer.c_out;

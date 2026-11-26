@@ -36,6 +36,10 @@
 //   6 bias            f32 | f16 | bf16 [C_out]
 //   output            T             f16               T
 //
+// SparseConv (a proposal, not in t4sparse) is the same node for a convolution whose output points
+// are computed: M rows, which SparseRulebook reports, take N's place in inputs 2 to 5 and in the
+// output, and pairs and tile_mask are not padded: [k0, k1, k2, M] and [M]. See Rows below.
+//
 // Which T has a kernel is the library's answer, not this table's: spconv_refusal() below says
 // what the spconv-backed plugin runs.
 //
@@ -125,10 +129,16 @@ bool accepts(std::int32_t position, nvinfer1::DataType type, nvinfer1::DataType 
 Refusal type_refusal(const nvinfer1::DataType* input_types, std::int32_t n_inputs,
                      const Scales& scales);
 
+/// Which input gives the row count the rulebook tensors are sized by, and the output's rows.
+/// SubMConv: the features, one output row per input point. SparseConv (strided; a proposal, not
+/// yet in t4sparse): point_mask, whose rows the rulebook computed.
+enum class Rows { kFeatures, kPointMask };
+
 /// Refuses everything the table says, plus shapes that disagree with each
 /// other; nothing about the kernel table.
 Refusal refusal(const nvinfer1::DynamicPluginTensorDesc* input_descs, std::int32_t n_inputs,
-                nvinfer1::DataType output_type_given, const Scales& scales);
+                nvinfer1::DataType output_type_given, const Scales& scales,
+                Rows rows = Rows::kFeatures);
 
 /// What the contract accepts and spconv does not run: bfloat16 and float8e4m3 features, and
 /// an 8-bit output.

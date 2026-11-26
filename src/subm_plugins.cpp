@@ -578,6 +578,18 @@ struct ConvAttrs
   subm::Scales scales;
   std::string problem;  ///< an attribute of the wrong type, or empty
   std::string node_name;
+  /// False for SubMConv: one output row per input point. True for SparseConv: the output rows
+  /// are point_mask's, which SparseRulebook computed.
+  bool computed_rows{false};
+
+  const char * plugin_name() const
+  {
+    return computed_rows ? kSPARSE_CONV_PLUGIN_NAME : kSUBM_CONV_PLUGIN_NAME;
+  }
+  subm::Rows rows() const
+  {
+    return computed_rows ? subm::Rows::kPointMask : subm::Rows::kFeatures;
+  }
 };
 
 /// spconv's activation for the node's, or nothing for a name the node does not define.
@@ -673,7 +685,7 @@ public:
     return nullptr;
   }
 
-  const char * getPluginName() const noexcept override { return kSUBM_CONV_PLUGIN_NAME; }
+  const char * getPluginName() const noexcept override { return attrs_.plugin_name(); }
   const char * getPluginVersion() const noexcept override { return kSUBM_PLUGIN_VERSION; }
   const char * getPluginNamespace() const noexcept override { return kSUBM_PLUGIN_NAMESPACE; }
 
@@ -687,7 +699,8 @@ public:
     if (!attrs_.problem.empty()) {
       return fail(attrs_.problem);
     }
-    if (const auto why = subm::refusal(in, num_inputs, out[0].desc.type, attrs_.scales)) {
+    if (const auto why =
+          subm::refusal(in, num_inputs, out[0].desc.type, attrs_.scales, attrs_.rows())) {
       return fail(*why);
     }
     if (!activation_of(attrs_.activation)) {
@@ -732,8 +745,13 @@ public:
         "features of rank " + std::to_string(inputs[0].nbDims) + ", weights of rank " +
         std::to_string(inputs[1].nbDims) + "; want 2 and 5");
     }
+    if (attrs_.computed_rows && inputs[at(Slot::kPointMask)].nbDims != 2) {
+      return fail(
+        "point_mask of rank " + std::to_string(inputs[at(Slot::kPointMask)].nbDims) + "; want 2");
+    }
     out[0].nbDims = 2;
-    out[0].d[0] = inputs[0].d[0];  // submanifold: one row per input point
+    // SubMConv: one row per input point. SparseConv: the rows the rulebook computed.
+    out[0].d[0] = attrs_.computed_rows ? inputs[at(Slot::kPointMask)].d[0] : inputs[0].d[0];
     out[0].d[1] = inputs[1].d[0];  // C_out
     return 0;
   }
@@ -815,10 +833,12 @@ public:
     using ConvGemmOps = spconvlib::spconv::csrc::sparse::convops::spops::ConvGemmOps;
     using StaticAllocator = spconvlib::spconv::csrc::sparse::alloc::StaticAllocator;
 
+    // n: output rows; n_in: input rows, the same unless the rulebook computed the output's.
     const std::int64_t n = output_desc[0].dims.d[0];
+    const std::int64_t n_in = input_desc[at(Slot::kFeatures)].dims.d[0];
     // TensorRT times a plugin during the build against buffers it never filled. Here those are
     // indices, so a build-phase instance does nothing.
-    if (n <= 0 || build_phase_) {
+    if (n <= 0 || n_in <= 0 || build_phase_) {
       return 0;
     }
 
@@ -827,7 +847,9 @@ public:
     const std::int64_t c_in = weight_dims.d[4];
     const std::int64_t kernel_volume = weight_dims.d[1] * weight_dims.d[2] * weight_dims.d[3];
     const Dims & pair_dims = input_desc[at(Slot::kPairs)].dims;
-    const std::int32_t padded = subm::padded_rows(static_cast<std::int32_t>(n));
+    const std::int32_t padded =
+      attrs_.computed_rows ? static_cast<std::int32_t>(n)
+                           : subm::padded_rows(static_cast<std::int32_t>(n));
     if (
       pair_dims.nbDims != 4 || pair_dims.d[0] != weight_dims.d[1] ||
       pair_dims.d[1] != weight_dims.d[2] || pair_dims.d[2] != weight_dims.d[3] ||
@@ -856,11 +878,12 @@ public:
       const tv::DType bias_dtype = is_8bit ? tv::float32 : dtype;
 
       tv::Tensor features =
-        tv::from_blob(const_cast<void *>(inputs[at(Slot::kFeatures)]), {n, c_in}, dtype, 0);
+        tv::from_blob(const_cast<void *>(inputs[at(Slot::kFeatures)]), {n_in, c_in}, dtype, 0);
       tv::Tensor weights = tv::from_blob(
         const_cast<void *>(inputs[at(Slot::kWeights)]),
         {c_out, weight_dims.d[1], weight_dims.d[2], weight_dims.d[3], c_in}, dtype, 0);
-      // spconv's rulebook as SubMRulebook wrote it: [kernel_volume, N] at the start of pairs.
+      // spconv's rulebook as the rulebook node wrote it: [kernel_volume, rows] at the start of
+      // pairs.
       tv::Tensor pair_fwd = tv::from_blob(
         const_cast<void *>(inputs[at(Slot::kPairs)]), {kernel_volume, n}, tv::int32, 0);
       tv::Tensor pair_mask =
@@ -903,7 +926,8 @@ public:
 
       ConvGemmOps::implicit_gemm(
         alloc, *tuner_, features, weights, pair_fwd, pair_mask_splits, mask_argsort_splits,
-        static_cast<int>(n), mask_tensor_, arch_, false /*is_train*/, true /*is_subm*/,
+        static_cast<int>(n), mask_tensor_, arch_, false /*is_train*/,
+        !attrs_.computed_rows /*is_subm*/,
         reinterpret_cast<std::uintptr_t>(stream), tv::CUDAKernelTimer(false),
         true /*auto_fp32_accum*/, false /*fp32_accum*/, bias, attrs_.act_alpha, 0.0F /*act_beta*/,
         *activation, false /*use_tf32*/, 1.0F /*output_scale*/, scale, tv::Tensor() /*output_add*/,
@@ -932,7 +956,7 @@ private:
 
   std::int32_t fail(const std::string & why) const
   {
-    return refuse(kSUBM_CONV_PLUGIN_NAME, attrs_.node_name, why);
+    return refuse(attrs_.plugin_name(), attrs_.node_name, why);
   }
 
   ConvAttrs attrs_;
@@ -949,7 +973,7 @@ private:
 class SubMConvPluginCreator : public nvinfer1::IPluginCreatorV3One
 {
 public:
-  SubMConvPluginCreator()
+  explicit SubMConvPluginCreator(bool computed_rows = false) : computed_rows_(computed_rows)
   {
     fields_.emplace_back("activation", nullptr, PluginFieldType::kCHAR, 1);
     fields_.emplace_back("act_alpha", nullptr, PluginFieldType::kFLOAT32, 1);
@@ -965,6 +989,7 @@ public:
   {
     try {
       ConvAttrs attrs;
+      attrs.computed_rows = computed_rows_;
       if (name != nullptr) {
         attrs.node_name = name;
       }
@@ -994,7 +1019,476 @@ public:
   }
 
   const PluginFieldCollection * getFieldNames() noexcept override { return &fc_; }
-  const char * getPluginName() const noexcept override { return kSUBM_CONV_PLUGIN_NAME; }
+  const char * getPluginName() const noexcept override
+  {
+    return computed_rows_ ? kSPARSE_CONV_PLUGIN_NAME : kSUBM_CONV_PLUGIN_NAME;
+  }
+  const char * getPluginVersion() const noexcept override { return kSUBM_PLUGIN_VERSION; }
+  const char * getPluginNamespace() const noexcept override { return kSUBM_PLUGIN_NAMESPACE; }
+
+private:
+  bool computed_rows_;
+  std::vector<PluginField> fields_;
+  PluginFieldCollection fc_{};
+};
+
+class SparseConvPluginCreator : public SubMConvPluginCreator
+{
+public:
+  SparseConvPluginCreator() : SubMConvPluginCreator(true) {}
+};
+
+// --- SparseRulebook ------------------------------------------------------------------------
+//
+// The rulebook of a convolution whose output points are computed: a stride, or a padding other
+// than kernel / 2. A proposal; t4sparse has no such node yet.
+//
+// attributes: kernel_size, stride, padding, dilation, spatial_shape (the input grid): ints[3]
+// in : 0 coords       int32 [N, 4]
+// out: 0 pairs        int32 [k0, k1, k2, M]
+//      1 point_mask   int32 [M, 1]
+//      2 mask_argsort int32 [M]
+//      3 tile_mask    int32 [M]
+//      4 out_coords   int32 [M, 4]
+//      5 out_count    int32 scalar, M: the size tensor every other shape has as an extent
+//
+// Outputs 0 to 3 are SubMRulebook's with M, the output point count, in place of N, and without
+// its padding: TensorRT allows no arithmetic on a size tensor. They feed a SparseConv;
+// out_coords feeds the next rulebook. The contents are spconv's, as in SubMRulebook.
+
+struct SparseRulebookAttrs
+{
+  std::vector<std::int32_t> kernel_size;
+  std::vector<std::int32_t> stride;
+  std::vector<std::int32_t> padding;
+  std::vector<std::int32_t> dilation{1, 1, 1};
+  std::vector<std::int32_t> spatial_shape;
+  std::int32_t do_sort{1};  ///< as in RulebookAttrs
+  std::string node_name;
+
+  std::int32_t kernel_volume() const
+  {
+    return std::accumulate(kernel_size.begin(), kernel_size.end(), 1, std::multiplies<>());
+  }
+
+  /// Why a node has no rulebook, or empty. The kernel limits are SubMRulebook's.
+  std::string problem() const
+  {
+    const std::pair<const char *, const std::vector<std::int32_t> *> lists[] = {
+      {"kernel_size", &kernel_size},
+      {"stride", &stride},
+      {"padding", &padding},
+      {"dilation", &dilation},
+      {"spatial_shape", &spatial_shape}};
+    for (const auto & [name, values] : lists) {
+      if (values->empty()) {
+        return std::string(name) + " is missing";
+      }
+      if (values->size() != 3) {
+        return std::string(name) + " " + extent(*values) + "; three ints";
+      }
+    }
+    std::int64_t taps = 1;
+    for (const auto k : kernel_size) {
+      if (k < 1 || k % 2 == 0) {
+        return "kernel_size " + extent(kernel_size) + "; odd on every axis";
+      }
+      taps *= k;
+    }
+    if (taps > 32) {
+      return "kernel_size " + extent(kernel_size) + " has " + std::to_string(taps) +
+             " taps; at most 32";
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+      if (stride[axis] < 1 || dilation[axis] < 1 || spatial_shape[axis] < 1) {
+        return "stride " + extent(stride) + ", dilation " + extent(dilation) +
+               ", spatial_shape " + extent(spatial_shape) + "; positive on every axis";
+      }
+      if (padding[axis] < 0) {
+        return "padding " + extent(padding) + "; not negative";
+      }
+    }
+    return {};
+  }
+};
+
+class SparseRulebookPlugin : public IPluginV3,
+                             public nvinfer1::IPluginV3OneCore,
+                             public nvinfer1::IPluginV3OneBuild,
+                             public nvinfer1::IPluginV3OneRuntime
+{
+public:
+  SparseRulebookPlugin(SparseRulebookAttrs attrs, TensorRTPhase phase)
+  : attrs_(std::move(attrs)), build_phase_(phase == TensorRTPhase::kBUILD)
+  {
+    const auto add = [this](const char * name, const std::vector<std::int32_t> & values) {
+      fields_.emplace_back(
+        name, values.data(), PluginFieldType::kINT32, static_cast<std::int32_t>(values.size()));
+    };
+    add("kernel_size", attrs_.kernel_size);
+    add("stride", attrs_.stride);
+    add("padding", attrs_.padding);
+    add("dilation", attrs_.dilation);
+    add("spatial_shape", attrs_.spatial_shape);
+    fields_.emplace_back("do_sort", &attrs_.do_sort, PluginFieldType::kINT32, 1);
+    fc_.nbFields = static_cast<std::int32_t>(fields_.size());
+    fc_.fields = fields_.data();
+  }
+
+  nvinfer1::IPluginCapability * getCapabilityInterface(
+    nvinfer1::PluginCapabilityType type) noexcept override
+  {
+    switch (type) {
+      case nvinfer1::PluginCapabilityType::kCORE:
+        return static_cast<nvinfer1::IPluginV3OneCore *>(this);
+      case nvinfer1::PluginCapabilityType::kBUILD:
+        return static_cast<nvinfer1::IPluginV3OneBuild *>(this);
+      case nvinfer1::PluginCapabilityType::kRUNTIME:
+        return static_cast<nvinfer1::IPluginV3OneRuntime *>(this);
+    }
+    return nullptr;
+  }
+
+  IPluginV3 * clone() noexcept override
+  {
+    try {
+      return new SparseRulebookPlugin(
+        attrs_, build_phase_ ? TensorRTPhase::kBUILD : TensorRTPhase::kRUNTIME);
+    } catch (const std::exception & e) {
+      caughtError(e);
+    }
+    return nullptr;
+  }
+
+  const char * getPluginName() const noexcept override { return kSPARSE_RULEBOOK_PLUGIN_NAME; }
+  const char * getPluginVersion() const noexcept override { return kSUBM_PLUGIN_VERSION; }
+  const char * getPluginNamespace() const noexcept override { return kSUBM_PLUGIN_NAMESPACE; }
+
+  std::int32_t getNbOutputs() const noexcept override { return kOutputs; }
+
+  std::int32_t configurePlugin(
+    const DynamicPluginTensorDesc * in, std::int32_t num_inputs, const DynamicPluginTensorDesc *,
+    std::int32_t num_outputs) noexcept override
+  {
+    if (num_inputs != 1 || num_outputs != kOutputs) {
+      return fail(
+        std::to_string(num_inputs) + " inputs, " + std::to_string(num_outputs) +
+        " outputs; want 1 and " + std::to_string(kOutputs));
+    }
+    if (in[0].desc.dims.nbDims != 2 || in[0].desc.dims.d[1] != 4) {
+      return fail("coords are " + subm::dims_string(in[0].desc.dims) + "; want [N, 4]");
+    }
+    if (const auto why = attrs_.problem(); !why.empty()) {
+      return fail(why);
+    }
+    if (in[0].max.d[0] > kMaxPoints) {
+      return fail(
+        "up to " + std::to_string(in[0].max.d[0]) + " points; this plugin indexes at most " +
+        std::to_string(kMaxPoints));
+    }
+    return 0;
+  }
+
+  std::int32_t getOutputDataTypes(
+    DataType * out, std::int32_t num_outputs, const DataType *, std::int32_t) const noexcept override
+  {
+    for (std::int32_t i = 0; i < num_outputs; ++i) {
+      out[i] = DataType::kINT32;
+    }
+    return 0;
+  }
+
+  std::int32_t getOutputShapes(
+    const DimsExprs * inputs, std::int32_t num_inputs, const DimsExprs *, std::int32_t,
+    DimsExprs * out, std::int32_t num_outputs, nvinfer1::IExprBuilder & builder) noexcept override
+  {
+    if (num_inputs != 1 || num_outputs != kOutputs || inputs[0].nbDims != 2) {
+      return -1;
+    }
+    if (const auto why = attrs_.problem(); !why.empty()) {
+      return fail(why);
+    }
+    using nvinfer1::DimensionOperation;
+    // M is known only once the rulebook ran: output 5 is the size tensor that carries it. The
+    // builder tunes for half the input points, and the plugin's index limit bounds it.
+    const nvinfer1::IDimensionExpr * m = builder.declareSizeTensor(
+      kCountOutput,
+      *builder.operation(DimensionOperation::kCEIL_DIV, *inputs[0].d[0], *builder.constant(2)),
+      *builder.constant(kMaxPoints));
+    // TensorRT refuses arithmetic on a size tensor, so no shape here is M rounded or divided:
+    // pairs and tile_mask have M rows where SubMRulebook's are padded.
+    out[0].nbDims = 4;
+    for (int axis = 0; axis < 3; ++axis) {
+      out[0].d[axis] = builder.constant(attrs_.kernel_size[axis]);
+    }
+    out[0].d[3] = m;
+
+    out[1].nbDims = 2;
+    out[1].d[0] = m;
+    out[1].d[1] = builder.constant(1);
+
+    out[2].nbDims = 1;
+    out[2].d[0] = m;
+
+    out[3].nbDims = 1;
+    out[3].d[0] = m;
+
+    out[4].nbDims = 2;
+    out[4].d[0] = m;
+    out[4].d[1] = builder.constant(4);
+
+    out[kCountOutput].nbDims = 0;
+    return 0;
+  }
+
+  bool supportsFormatCombination(
+    std::int32_t pos, const DynamicPluginTensorDesc * in_out, std::int32_t,
+    std::int32_t) noexcept override
+  {
+    return in_out[pos].desc.format == nvinfer1::TensorFormat::kLINEAR &&
+           in_out[pos].desc.type == DataType::kINT32;
+  }
+
+  std::size_t getWorkspaceSize(
+    const DynamicPluginTensorDesc *, std::int32_t, const DynamicPluginTensorDesc *,
+    std::int32_t) const noexcept override
+  {
+    if (!attrs_.problem().empty()) {
+      return 0;
+    }
+    return layout_of(attrs_).thrust_tmp_offset + kThrustTempBytes;
+  }
+
+  std::int32_t onShapeChange(
+    const PluginTensorDesc *, std::int32_t, const PluginTensorDesc *, std::int32_t) noexcept override
+  {
+    return 0;
+  }
+
+  IPluginV3 * attachToContext(nvinfer1::IPluginResourceContext *) noexcept override
+  {
+    return clone();
+  }
+
+  const PluginFieldCollection * getFieldsToSerialize() noexcept override { return &fc_; }
+
+  std::int32_t enqueue(
+    const PluginTensorDesc * input_desc, const PluginTensorDesc *, const void * const * inputs,
+    void * const * outputs, void * workspace, cudaStream_t stream) noexcept override
+  {
+    using SpconvOps = spconvlib::spconv::csrc::sparse::all::SpconvOps;
+    using StaticAllocator = spconvlib::spconv::csrc::sparse::alloc::StaticAllocator;
+
+    const std::int64_t n = input_desc[0].dims.d[0];
+    if (n > kMaxPoints) {
+      return fail(std::to_string(n) + " points; at most " + std::to_string(kMaxPoints));
+    }
+    // TensorRT times a plugin during the build against buffers it never filled, and still reads
+    // the count: a build-phase instance reports the count the builder tunes for and writes
+    // nothing else.
+    if (n <= 0 || build_phase_) {
+      return write_count(static_cast<std::int32_t>(n <= 0 ? 0 : (n + 1) / 2), outputs, stream);
+    }
+
+    std::int32_t count = 0;
+    try {
+      const Layout layout = layout_of(attrs_);
+      const int kernel_volume = attrs_.kernel_volume();
+      auto * const ws = static_cast<std::uint8_t *>(workspace);
+
+      const std::vector<int> ksize(attrs_.kernel_size.begin(), attrs_.kernel_size.end());
+      const std::vector<int> stride(attrs_.stride.begin(), attrs_.stride.end());
+      const std::vector<int> padding(attrs_.padding.begin(), attrs_.padding.end());
+      const std::vector<int> dilation(attrs_.dilation.begin(), attrs_.dilation.end());
+      const std::vector<int> spatial(attrs_.spatial_shape.begin(), attrs_.spatial_shape.end());
+
+      const auto max_act_out_theory = SpconvOps::get_handcrafted_max_act_out(
+        static_cast<std::size_t>(n), ksize, stride, padding, dilation);
+      auto ws_tensors = SpconvOps::get_indice_gen_tensors_from_workspace(
+        ws, kernel_volume, kMaxPoints, kMaxPoints, max_act_out_theory, false /*subm*/,
+        layout.use_int64_hash_k, true /*direct_table*/);
+
+      // TensorRT sizes every output for kMaxPoints rows, the size tensor's bound; spconv takes
+      // what it needs of each.
+      tv::Tensor input_indices =
+        tv::from_blob(const_cast<void *>(inputs[0]), {n, 4}, tv::int32, 0);
+      tv::Tensor pair_fwd = tv::from_blob(outputs[0], {kernel_volume, kMaxPoints}, tv::int32, 0);
+      tv::Tensor pair_mask = tv::from_blob(outputs[1], {1, kMaxPoints}, tv::int32, 0);
+      tv::Tensor mask_argsort = tv::from_blob(outputs[2], {1, kMaxPoints}, tv::int32, 0);
+      tv::Tensor out_indices = tv::from_blob(outputs[4], {kMaxPoints, 4}, tv::int32, 0);
+
+      std::uint8_t * extra = ws + layout.kernel_num_offset;
+      tv::Tensor indices_kernel_num = tv::from_blob(extra, {kernel_volume}, tv::int32, 0);
+      extra += static_cast<std::size_t>(kernel_volume) * sizeof(std::int32_t);
+      // spconv also writes the backward tables, which only training reads.
+      tv::Tensor pair_bwd = tv::from_blob(extra, {kernel_volume, kMaxPoints}, tv::int32, 0);
+      extra += static_cast<std::size_t>(kernel_volume) * kMaxPoints * sizeof(std::int32_t);
+      tv::Tensor pair_mask_bwd = tv::from_blob(extra, {1, kMaxPoints}, tv::int32, 0);
+      extra += static_cast<std::size_t>(kMaxPoints) * sizeof(std::int32_t);
+      tv::Tensor mask_argsort_bwd = tv::from_blob(extra, {1, kMaxPoints}, tv::int32, 0);
+      tv::Tensor thrust_tmp = tv::from_blob(
+        ws + layout.thrust_tmp_offset, {static_cast<std::int64_t>(kThrustTempBytes)}, tv::uint8,
+        0);
+
+      if (
+        PLUGIN_CUDA_CHECK(cudaMemsetAsync(
+          ws + layout.kernel_num_offset, 0, static_cast<std::size_t>(kernel_volume) * 4, stream)) !=
+        cudaSuccess) {
+        return -1;
+      }
+
+      ws_tensors.emplace(SPCONV_ALLOC_PAIR_FWD, pair_fwd);
+      ws_tensors.emplace(SPCONV_ALLOC_PAIR_BWD, pair_bwd);
+      ws_tensors.emplace(SPCONV_ALLOC_PAIR_MASK, pair_mask);
+      ws_tensors.emplace(SPCONV_ALLOC_PAIR_MASK_BWD, pair_mask_bwd);
+      ws_tensors.emplace(SPCONV_ALLOC_MASK_ARG_SORT, mask_argsort);
+      ws_tensors.emplace(SPCONV_ALLOC_MASK_ARG_SORT_BWD, mask_argsort_bwd);
+      ws_tensors.emplace(SPCONV_ALLOC_OUT_INDICES, out_indices);
+      ws_tensors.emplace(
+        SPCONV_ALLOC_INDICE_NUM_PER_LOC, indices_kernel_num);  // cSpell:ignore INDICE
+      StaticAllocator alloc(ws_tensors);
+      alloc.thrust_tmp_tensor_ = thrust_tmp;
+
+      // cSpell:ignore indice subm
+      const auto result = SpconvOps::get_indice_pairs_implicit_gemm(
+        alloc, input_indices, 1 /*batch_size*/, spatial,
+        static_cast<int>(tv::gemm::SparseConvAlgo::kMaskImplicitGemm), ksize, stride, padding,
+        dilation, {0, 0, 0}, false /*subm*/, false /*transposed*/, false /*is_train*/,
+        reinterpret_cast<std::uintptr_t>(stream), kMaxPoints, tv::CUDAKernelTimer(false),
+        true /*direct_table*/, attrs_.do_sort != 0);
+      count = std::get<1>(result);
+      // tile_mask, which spconv has no use for, is zero.
+      if (
+        PLUGIN_CUDA_CHECK(cudaMemsetAsync(
+          outputs[3], 0, static_cast<std::size_t>(count) * sizeof(std::int32_t), stream)) !=
+        cudaSuccess) {
+        return -1;
+      }
+    } catch (const std::exception & e) {
+      caughtError(e);
+      return -1;
+    }
+    return write_count(count, outputs, stream);
+  }
+
+private:
+  static constexpr std::int32_t kOutputs{6};
+  static constexpr std::int32_t kCountOutput{5};
+  static constexpr int kMaxPoints{512000};
+  static constexpr std::size_t kThrustTempBytes{8U * 1024U * 1024U};
+
+  /// The workspace: spconv's index-generation buffers, then the per-tap counts, the backward
+  /// tables and the sort scratch.
+  struct Layout
+  {
+    bool use_int64_hash_k;
+    std::size_t kernel_num_offset;
+    std::size_t thrust_tmp_offset;
+  };
+
+  static Layout layout_of(const SparseRulebookAttrs & attrs)
+  {
+    using SpconvOps = spconvlib::spconv::csrc::sparse::all::SpconvOps;
+    const std::vector<int> ksize(attrs.kernel_size.begin(), attrs.kernel_size.end());
+    const std::vector<int> stride(attrs.stride.begin(), attrs.stride.end());
+    const std::vector<int> padding(attrs.padding.begin(), attrs.padding.end());
+    const std::vector<int> dilation(attrs.dilation.begin(), attrs.dilation.end());
+    const std::vector<int> spatial(attrs.spatial_shape.begin(), attrs.spatial_shape.end());
+    std::int64_t out_volume = 1;
+    const auto out_shape =
+      SpconvOps::get_conv_output_size(spatial, ksize, stride, padding, dilation);
+    for (const auto extent : out_shape) {
+      out_volume *= extent;
+    }
+    Layout layout{};
+    layout.use_int64_hash_k =
+      out_volume >= static_cast<std::int64_t>(std::numeric_limits<int>::max());
+    const int kernel_volume = attrs.kernel_volume();
+    layout.kernel_num_offset = static_cast<std::size_t>(SpconvOps::get_indice_gen_workspace_size(
+      kernel_volume, kMaxPoints, kMaxPoints, kMaxPoints, false, layout.use_int64_hash_k, true));
+    layout.thrust_tmp_offset =
+      layout.kernel_num_offset +
+      (static_cast<std::size_t>(kernel_volume) +
+       (static_cast<std::size_t>(kernel_volume) + 2) * kMaxPoints) *
+        sizeof(std::int32_t);
+    return layout;
+  }
+
+  std::int32_t write_count(std::int32_t count, void * const * outputs, cudaStream_t stream)
+  {
+    count_ = count;
+    return PLUGIN_CUDA_CHECK(cudaMemcpyAsync(
+             outputs[kCountOutput], &count_, sizeof(count_), cudaMemcpyHostToDevice, stream)) ==
+               cudaSuccess
+             ? 0
+             : -1;
+  }
+
+  std::int32_t fail(const std::string & why) const
+  {
+    return refuse(kSPARSE_RULEBOOK_PLUGIN_NAME, attrs_.node_name, why);
+  }
+
+  SparseRulebookAttrs attrs_;
+  bool build_phase_{false};
+  std::int32_t count_{0};  ///< outlives the copy enqueue starts
+  std::vector<PluginField> fields_;
+  PluginFieldCollection fc_{};
+};
+
+class SparseRulebookPluginCreator : public nvinfer1::IPluginCreatorV3One
+{
+public:
+  SparseRulebookPluginCreator()
+  {
+    for (const char * name : {"kernel_size", "stride", "padding", "dilation", "spatial_shape"}) {
+      fields_.emplace_back(name, nullptr, PluginFieldType::kINT32, 3);
+    }
+    fc_.nbFields = static_cast<std::int32_t>(fields_.size());
+    fc_.fields = fields_.data();
+  }
+
+  IPluginV3 * createPlugin(
+    const char * name, const PluginFieldCollection * fc, TensorRTPhase phase) noexcept override
+  {
+    try {
+      SparseRulebookAttrs attrs;
+      if (name != nullptr) {
+        attrs.node_name = name;
+      }
+      if (phase == TensorRTPhase::kBUILD) {
+        const char * sort = std::getenv("AUTOWARE_SUBM_RULEBOOK_SORT");
+        attrs.do_sort = (sort != nullptr && std::strcmp(sort, "0") == 0) ? 0 : 1;
+      }
+      for (std::int32_t i = 0; fc != nullptr && i < fc->nbFields; ++i) {
+        const PluginField & field = fc->fields[i];
+        if (field.data == nullptr) {
+          continue;
+        }
+        const std::string field_name = field.name;
+        if (field_name == "kernel_size") {
+          read_ints(field, attrs.kernel_size);
+        } else if (field_name == "stride") {
+          read_ints(field, attrs.stride);
+        } else if (field_name == "padding") {
+          read_ints(field, attrs.padding);
+        } else if (field_name == "dilation") {
+          read_ints(field, attrs.dilation);
+        } else if (field_name == "spatial_shape") {
+          read_ints(field, attrs.spatial_shape);
+        } else if (field_name == "do_sort") {
+          attrs.do_sort = read_int(field, attrs.do_sort);
+        }
+      }
+      return new SparseRulebookPlugin(std::move(attrs), phase);
+    } catch (const std::exception & e) {
+      caughtError(e);
+    }
+    return nullptr;
+  }
+
+  const PluginFieldCollection * getFieldNames() noexcept override { return &fc_; }
+  const char * getPluginName() const noexcept override { return kSPARSE_RULEBOOK_PLUGIN_NAME; }
   const char * getPluginVersion() const noexcept override { return kSUBM_PLUGIN_VERSION; }
   const char * getPluginNamespace() const noexcept override { return kSUBM_PLUGIN_NAMESPACE; }
 
@@ -1005,6 +1499,8 @@ private:
 
 REGISTER_TENSORRT_PLUGIN(SubMRulebookPluginCreator);
 REGISTER_TENSORRT_PLUGIN(SubMConvPluginCreator);
+REGISTER_TENSORRT_PLUGIN(SparseRulebookPluginCreator);
+REGISTER_TENSORRT_PLUGIN(SparseConvPluginCreator);
 
 }  // namespace
 
@@ -1017,6 +1513,18 @@ nvinfer1::IPluginCreatorV3One * subm_rulebook_creator() noexcept
 nvinfer1::IPluginCreatorV3One * subm_conv_creator() noexcept
 {
   static SubMConvPluginCreator creator;
+  return &creator;
+}
+
+nvinfer1::IPluginCreatorV3One * sparse_rulebook_creator() noexcept
+{
+  static SparseRulebookPluginCreator creator;
+  return &creator;
+}
+
+nvinfer1::IPluginCreatorV3One * sparse_conv_creator() noexcept
+{
+  static SparseConvPluginCreator creator;
   return &creator;
 }
 
