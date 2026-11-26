@@ -412,6 +412,181 @@ TEST_P(SegmentCsrPathTest, FloatMeanIsBitExact)
   run_segment_csr_path_case<float, MEAN>(GetParam());
 }
 
+// The 8-bit element types, MIN and MAX: every byte value occurs, and the result is compared bit by
+// bit with a CPU reference that orders the elements by their decoded values.
+
+float decode(const std::int8_t value)
+{
+  return static_cast<float>(value);
+}
+
+// E4M3: 1 sign, 4 exponent (bias 7), 3 mantissa bits; 0x7F and 0xFF are NaN, there is no infinity.
+float decode(const Float8E4M3 value)
+{
+  const int exponent = (value.bits >> 3U) & 0xF;
+  const int mantissa = value.bits & 0x7;
+  if ((value.bits & 0x7FU) == 0x7FU) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  const float magnitude = exponent == 0
+                            ? std::ldexp(static_cast<float>(mantissa), -9)
+                            : std::ldexp(1.0F + static_cast<float>(mantissa) / 8.0F, exponent - 7);
+  return (value.bits & 0x80U) != 0U ? -magnitude : magnitude;
+}
+
+// The order of the decoded values, with -0 below +0; false when either is NaN.
+template <typename T>
+bool less(const T lhs, const T rhs)
+{
+  const float a = decode(lhs);
+  const float b = decode(rhs);
+  return a < b || (a == b && std::signbit(a) && !std::signbit(b));
+}
+
+template <typename T>
+T from_byte(const std::uint8_t byte)
+{
+  T value;
+  std::memcpy(&value, &byte, sizeof(T));
+  return value;
+}
+
+// Column 1 alternates 0x7F and 0xFF (both NaN in E4M3; 127 and -1 in int8); the rest walks all 256
+// byte values.
+template <typename T>
+T make_8bit_value(const std::size_t row, const std::size_t col)
+{
+  if (col == 1U) {
+    return from_byte<T>(row % 2U == 0U ? 0x7FU : 0xFFU);
+  }
+  return from_byte<T>(static_cast<std::uint8_t>((row * 37U + col * 101U + row * col) % 256U));
+}
+
+// Mirrors Reducer: the first of equal elements stays, and NaN, which compares false with
+// everything, never replaces the start value.
+template <typename T, ReductionType REDUCE>
+void make_8bit_reference(
+  const std::vector<T> & src, const std::size_t num_rows, const std::size_t cols,
+  const std::vector<std::int64_t> & indptr, std::vector<T> & out, std::vector<std::int64_t> & arg)
+{
+  const bool is_fp8 = std::is_same_v<T, Float8E4M3>;
+  const T start_value =
+    from_byte<T>(is_fp8 ? (REDUCE == MAX ? 0xFEU : 0x7EU) : (REDUCE == MAX ? 0x80U : 0x7FU));
+  out.assign((indptr.size() - 1U) * cols, from_byte<T>(0x00U));
+  arg.assign(out.size(), static_cast<std::int64_t>(num_rows));
+  for (std::size_t segment = 0; segment + 1U < indptr.size(); ++segment) {
+    const auto start = static_cast<std::size_t>(indptr[segment]);
+    const auto end = static_cast<std::size_t>(indptr[segment + 1U]);
+    for (std::size_t col = 0; col < cols; ++col) {
+      T value = start_value;
+      std::int64_t arg_index = 0;
+      for (std::size_t row = start; row < end; ++row) {
+        const T element = src[row * cols + col];
+        const bool replaces = REDUCE == MAX ? less(value, element) : less(element, value);
+        if (replaces) {
+          value = element;
+          arg_index = static_cast<std::int64_t>(row);
+        }
+      }
+      if (end > start) {
+        out[segment * cols + col] = value;
+        arg[segment * cols + col] = arg_index;
+      }
+    }
+  }
+}
+
+template <typename T, ReductionType REDUCE>
+void run_segment_csr_8bit_case(const SegmentCsrPathCase & test_case)
+{
+  SKIP_TEST_IF_CUDA_UNAVAILABLE();
+
+  const auto indptr = make_indptr();
+  const auto num_rows = static_cast<std::size_t>(indptr.back());
+  const auto cols = test_case.cols;
+
+  std::vector<T> src(num_rows * cols);
+  for (std::size_t row = 0; row < num_rows; ++row) {
+    for (std::size_t col = 0; col < cols; ++col) {
+      src[row * cols + col] = make_8bit_value<T>(row, col);
+    }
+  }
+  std::vector<T> expected_out;
+  std::vector<std::int64_t> expected_arg;
+  make_8bit_reference<T, REDUCE>(src, num_rows, cols, indptr, expected_out, expected_arg);
+
+  CudaStreamGuard stream;
+  DeviceBuffer<T> src_d(src.size() + test_case.src_offset);
+  DeviceBuffer<std::int64_t> indptr_d(indptr.size());
+  DeviceBuffer<T> out_d(expected_out.size() + test_case.out_offset);
+  DeviceBuffer<std::int64_t> arg_d(expected_arg.size());
+  copy_to_device(src_d.get() + test_case.src_offset, src);
+  copy_to_device(indptr_d.get(), indptr);
+  // Poison the output with a value no reference cell of an empty segment has.
+  ASSERT_EQ(
+    cudaMemset(out_d.get(), 0x55, sizeof(T) * (expected_out.size() + test_case.out_offset)),
+    cudaSuccess);
+
+  ASSERT_EQ(
+    (segment_csr_launch<T, REDUCE>(
+      src_d.get() + test_case.src_offset, static_cast<std::int32_t>(num_rows),
+      static_cast<std::int32_t>(cols), indptr_d.get(), static_cast<std::int32_t>(indptr.size()),
+      out_d.get() + test_case.out_offset, test_case.with_arg ? arg_d.get() : nullptr,
+      stream.get())),
+    0);
+  ASSERT_EQ(cudaStreamSynchronize(stream.get()), cudaSuccess);
+
+  const auto actual_out = copy_to_host(out_d.get() + test_case.out_offset, expected_out.size());
+  for (std::size_t index = 0; index < expected_out.size(); ++index) {
+    ASSERT_EQ(std::memcmp(&actual_out[index], &expected_out[index], sizeof(T)), 0)
+      << "index=" << index << " actual=" << decode(actual_out[index])
+      << " expected=" << decode(expected_out[index]);
+  }
+  if (test_case.with_arg) {
+    EXPECT_EQ(copy_to_host(arg_d.get(), expected_arg.size()), expected_arg);
+  }
+}
+
+class SegmentCsr8BitTest : public ::testing::TestWithParam<SegmentCsrPathCase>
+{
+};
+
+TEST_P(SegmentCsr8BitTest, Int8MaxIsBitExact)
+{
+  run_segment_csr_8bit_case<std::int8_t, MAX>(GetParam());
+}
+
+TEST_P(SegmentCsr8BitTest, Int8MinIsBitExact)
+{
+  run_segment_csr_8bit_case<std::int8_t, MIN>(GetParam());
+}
+
+TEST_P(SegmentCsr8BitTest, Fp8MaxIsBitExact)
+{
+  run_segment_csr_8bit_case<Float8E4M3, MAX>(GetParam());
+}
+
+TEST_P(SegmentCsr8BitTest, Fp8MinIsBitExact)
+{
+  run_segment_csr_8bit_case<Float8E4M3, MIN>(GetParam());
+}
+
+// The ordering the kernel uses, against the decoded values, for all pairs of bytes.
+TEST(SegmentCsrFp8OrderTest, MatchesDecodedValues)
+{
+  for (unsigned int lhs = 0; lhs < 256U; ++lhs) {
+    for (unsigned int rhs = 0; rhs < 256U; ++rhs) {
+      const Float8E4M3 a{static_cast<std::uint8_t>(lhs)};
+      const Float8E4M3 b{static_cast<std::uint8_t>(rhs)};
+      ASSERT_EQ(a < b, less(a, b)) << lhs << " < " << rhs;
+      ASSERT_EQ(a > b, less(b, a)) << lhs << " > " << rhs;
+    }
+  }
+  EXPECT_EQ(decode(Float8E4M3{0x7EU}), 448.0F);
+  EXPECT_EQ(decode(Float8E4M3{0xFEU}), -448.0F);
+  EXPECT_EQ(decode(Float8E4M3{0x38U}), 1.0F);
+}
+
 std::string segment_csr_path_case_name(const testing::TestParamInfo<SegmentCsrPathCase> & info)
 {
   return info.param.name;
@@ -428,6 +603,20 @@ INSTANTIATE_TEST_SUITE_P(
     SegmentCsrPathCase{"OddColumnsFallback", 7U, 0U, 0U, false},
     SegmentCsrPathCase{"SingleColumn", 1U, 0U, 0U, false},
     SegmentCsrPathCase{"ArgOutputFallback", 16U, 0U, 0U, true}),
+  segment_csr_path_case_name);
+
+// 16 channels per 16-byte vector for the 8-bit types.
+INSTANTIATE_TEST_SUITE_P(
+  ReferenceKernelsTest, SegmentCsr8BitTest,
+  testing::Values(
+    SegmentCsrPathCase{"Vectorized", 32U, 0U, 0U, false},
+    SegmentCsrPathCase{"VectorizedManyVectors", 4160U, 0U, 0U, false},
+    SegmentCsrPathCase{"VectorizedOddVectorCount", 48U, 0U, 0U, false},
+    SegmentCsrPathCase{"MisalignedSrcFallback", 32U, 1U, 0U, false},
+    SegmentCsrPathCase{"MisalignedOutFallback", 32U, 0U, 1U, false},
+    SegmentCsrPathCase{"OddColumnsFallback", 24U, 0U, 0U, false},
+    SegmentCsrPathCase{"SingleColumn", 1U, 0U, 0U, false},
+    SegmentCsrPathCase{"ArgOutputFallback", 32U, 0U, 0U, true}),
   segment_csr_path_case_name);
 
 }  // namespace

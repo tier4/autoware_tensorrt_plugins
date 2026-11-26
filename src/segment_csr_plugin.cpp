@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <exception>
 #include <string>
+#include <type_traits>
 namespace nvinfer1::plugin
 {
 
@@ -122,9 +123,13 @@ bool SegmentCSRPlugin::supportsFormatCombination(
 
   switch (pos) {
     case INOUT_IN_SRC_INDEX:
+      // The 8-bit types have MIN and MAX only, see segment_csr.h.
       supported &=
         (in_out[pos].desc.type == nvinfer1::DataType::kFLOAT ||
-         in_out[pos].desc.type == nvinfer1::DataType::kHALF);
+         in_out[pos].desc.type == nvinfer1::DataType::kHALF ||
+         ((in_out[pos].desc.type == nvinfer1::DataType::kINT8 ||
+           in_out[pos].desc.type == nvinfer1::DataType::kFP8) &&
+          (reduce_ == "min" || reduce_ == "max")));
       break;
     case INOUT_IN_INDPTR_INDEX:
       supported &= in_out[pos].desc.type == nvinfer1::DataType::kINT64;
@@ -200,6 +205,28 @@ std::int32_t SegmentCSRPlugin::enqueue(
       result = segment_csr_launch<half, REDUCE>(
         src_ptr, num_rows, num_cols, indptr_ptr, indptr_size, out_ptr, nullptr, stream);
     });
+  } else if (
+    input_desc[0].type == nvinfer1::DataType::kINT8 ||
+    input_desc[0].type == nvinfer1::DataType::kFP8) {
+    const std::int64_t * indptr_ptr = reinterpret_cast<const std::int64_t *>(inputs[1]);
+    // supportsFormatCombination admits these types for "min" and "max" only.
+    const bool is_max = reduce_ == "max";
+    const auto launch = [&](const auto * src_ptr, auto * out_ptr) {
+      using scalar_t = std::remove_pointer_t<decltype(out_ptr)>;
+      return is_max ? segment_csr_launch<scalar_t, ReductionType::MAX>(
+                        src_ptr, num_rows, num_cols, indptr_ptr, indptr_size, out_ptr, nullptr,
+                        stream)
+                    : segment_csr_launch<scalar_t, ReductionType::MIN>(
+                        src_ptr, num_rows, num_cols, indptr_ptr, indptr_size, out_ptr, nullptr,
+                        stream);
+    };
+    if (input_desc[0].type == nvinfer1::DataType::kINT8) {
+      result = launch(
+        reinterpret_cast<const std::int8_t *>(inputs[0]), static_cast<std::int8_t *>(outputs[0]));
+    } else {
+      result = launch(
+        reinterpret_cast<const Float8E4M3 *>(inputs[0]), static_cast<Float8E4M3 *>(outputs[0]));
+    }
   }
 
   return result;

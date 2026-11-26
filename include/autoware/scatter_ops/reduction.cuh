@@ -27,91 +27,129 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include <cstdint>
 #include <limits>
 #include <type_traits>
 
 // cSpell:ignore bfloat
+// The single-column kernel reduces inside a warp.
+static __device__ inline Float8E4M3 __shfl_down_sync(
+  const unsigned int mask, const Float8E4M3 value, const unsigned int delta)
+{
+  return Float8E4M3{
+    static_cast<std::uint8_t>(__shfl_down_sync(mask, static_cast<int>(value.bits), delta))};
+}
+
+// The branches on REDUCE are resolved at compile time, so an element type only has to provide
+// what its reductions use: ordering for MIN and MAX, arithmetic for the others. The 8-bit types
+// (int8, Float8E4M3) are MIN and MAX only.
 template <typename scalar_t, ReductionType REDUCE>
 struct Reducer
 {
+  static inline __host__ __device__ scalar_t zero()
+  {
+    if constexpr (std::is_same<scalar_t, Float8E4M3>::value) {
+      return Float8E4M3{0x00U};
+    } else {
+      return (scalar_t)0;
+    }
+  }
+
   static inline __host__ __device__ scalar_t init()
   {
-    if (REDUCE == MUL || REDUCE == DIV)
+    if constexpr (REDUCE == MUL || REDUCE == DIV) {
       return (scalar_t)1;
-    else if (REDUCE == MIN)
-      if (std::is_same<scalar_t, __half>::value || std::is_same<scalar_t, __nv_bfloat16>::value) {
+    } else if constexpr (REDUCE == MIN) {
+      if constexpr (
+        std::is_same<scalar_t, __half>::value || std::is_same<scalar_t, __nv_bfloat16>::value) {
         scalar_t max_val;
         *(reinterpret_cast<unsigned short *>(&(max_val))) =
           std::is_same<scalar_t, __half>::value ? 0x7C00 : 0x7F80;
         return max_val;
-      } else
+      } else if constexpr (std::is_same<scalar_t, Float8E4M3>::value) {
+        return Float8E4M3{0x7EU};  // 448, the largest value: E4M3 has no infinity
+      } else {
         return std::numeric_limits<scalar_t>::max();
-    else if (REDUCE == MAX)
-      if (std::is_same<scalar_t, __half>::value || std::is_same<scalar_t, __nv_bfloat16>::value) {
+      }
+    } else if constexpr (REDUCE == MAX) {
+      if constexpr (
+        std::is_same<scalar_t, __half>::value || std::is_same<scalar_t, __nv_bfloat16>::value) {
         scalar_t min_val;
         *(reinterpret_cast<unsigned short *>(&(min_val))) =
           std::is_same<scalar_t, __half>::value ? 0xFC00 : 0xFF80;
         return min_val;
-      } else
+      } else if constexpr (std::is_same<scalar_t, Float8E4M3>::value) {
+        return Float8E4M3{0xFEU};  // -448, the smallest value
+      } else {
         return std::numeric_limits<scalar_t>::lowest();
-    else
+      }
+    } else {
       return (scalar_t)0;
+    }
   }
 
   static inline __host__ __device__ void update(scalar_t * val, scalar_t new_val)
   {
-    if (REDUCE == SUM || REDUCE == MEAN)
+    if constexpr (REDUCE == SUM || REDUCE == MEAN) {
       *val = *val + new_val;
-    else if (REDUCE == MUL)
+    } else if constexpr (REDUCE == MUL) {
       *val = *val * new_val;
-    else if (REDUCE == DIV)
+    } else if constexpr (REDUCE == DIV) {
       *val = *val / new_val;
-    else if ((REDUCE == MIN && new_val < *val) || (REDUCE == MAX && new_val > *val))
-      *val = new_val;
+    } else if constexpr (REDUCE == MIN) {
+      if (new_val < *val) *val = new_val;
+    } else {
+      if (new_val > *val) *val = new_val;
+    }
   }
 
   static inline __host__ __device__ void update(
     scalar_t * val, scalar_t new_val, int64_t * arg, int64_t new_arg)
   {
-    if (REDUCE == SUM || REDUCE == MEAN)
+    if constexpr (REDUCE == SUM || REDUCE == MEAN) {
       *val = *val + new_val;
-    else if (REDUCE == MUL)
+    } else if constexpr (REDUCE == MUL) {
       *val = *val * new_val;
-    else if (REDUCE == DIV)
+    } else if constexpr (REDUCE == DIV) {
       *val = *val / new_val;
-    else if ((REDUCE == MIN && new_val < *val) || (REDUCE == MAX && new_val > *val)) {
-      *val = new_val;
-      *arg = new_arg;
+    } else if constexpr (REDUCE == MIN) {
+      if (new_val < *val) {
+        *val = new_val;
+        *arg = new_arg;
+      }
+    } else {
+      if (new_val > *val) {
+        *val = new_val;
+        *arg = new_arg;
+      }
     }
   }
 
   static inline __host__ __device__ void write(scalar_t * address, scalar_t val, int count)
   {
-    if (REDUCE == SUM || REDUCE == MUL || REDUCE == DIV)
+    if constexpr (REDUCE == SUM || REDUCE == MUL || REDUCE == DIV) {
       *address = val;
-    else if (REDUCE == MEAN)
+    } else if constexpr (REDUCE == MEAN) {
       *address = val / (scalar_t)(count > 0 ? count : 1);
-    else if (REDUCE == MIN || REDUCE == MAX) {
-      if (count > 0)
-        *address = val;
-      else
-        *address = (scalar_t)0;
+    } else {
+      *address = count > 0 ? val : zero();
     }
   }
 
   static inline __host__ __device__ void write(
     scalar_t * address, scalar_t val, int64_t * arg_address, int64_t arg, int count)
   {
-    if (REDUCE == SUM || REDUCE == MUL || REDUCE == DIV)
+    if constexpr (REDUCE == SUM || REDUCE == MUL || REDUCE == DIV) {
       *address = val;
-    else if (REDUCE == MEAN)
+    } else if constexpr (REDUCE == MEAN) {
       *address = val / (scalar_t)(count > 0 ? count : 1);
-    else if (REDUCE == MIN || REDUCE == MAX) {
+    } else {
       if (count > 0) {
         *address = val;
         *arg_address = arg;
-      } else
-        *address = (scalar_t)0;
+      } else {
+        *address = zero();
+      }
     }
   }
 
