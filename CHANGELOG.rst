@@ -2,6 +2,12 @@
 Changelog for package autoware_tensorrt_plugins
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.0.1 (2026-11-26)
+------------------
+* fix(build): require C++17 for the CUDA sources (`#9 <https://github.com/tier4/autoware_tensorrt_plugins/issues/9>`_)
+  * A lower CMAKE_CUDA_STANDARD passed by the build environment (e.g. -DCMAKE_CUDA_STANDARD=14) no longer overrides it and breaks the build
+* Contributors: badai nguyen
+
 1.0.0 (2026-11-25)
 ------------------
 * First release from the standalone repository, versioned independently of autoware_universe

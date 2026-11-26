@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.22)
 # colcon. When ament_cmake is available (a ROS 2 environment), ament_package() additionally
 # registers the package in the ament index so ROS 2 nodes locate it via the usual lookup.
 # Keep VERSION in sync with package.xml.
-project(autoware_tensorrt_plugins VERSION 1.0.0 LANGUAGES CXX)
+project(autoware_tensorrt_plugins VERSION 1.0.1 LANGUAGES CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
