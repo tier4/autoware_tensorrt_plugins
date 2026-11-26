@@ -31,6 +31,14 @@ constexpr char const * const kSUBM_PLUGIN_NAMESPACE{""};
 nvinfer1::IPluginCreatorV3One * subm_rulebook_creator() noexcept;
 nvinfer1::IPluginCreatorV3One * subm_conv_creator() noexcept;
 
+// SparseRulebook and SparseConv: the same node contract for convolutions whose output points are
+// computed (strided, or any padding). A proposal: t4sparse does not have this pair yet.
+constexpr char const * const kSPARSE_RULEBOOK_PLUGIN_NAME{"SparseRulebook"};
+constexpr char const * const kSPARSE_CONV_PLUGIN_NAME{"SparseConv"};
+
+nvinfer1::IPluginCreatorV3One * sparse_rulebook_creator() noexcept;
+nvinfer1::IPluginCreatorV3One * sparse_conv_creator() noexcept;
+
 }  // namespace autoware::tensorrt_plugins
 
 #endif  // AUTOWARE__TENSORRT_PLUGINS__SUBM_PLUGIN_CREATORS_HPP_

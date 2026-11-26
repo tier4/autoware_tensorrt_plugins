@@ -300,3 +300,37 @@ TEST(SubMContract, PairsArePaddedTo256Rows) {
   EXPECT_EQ(subm::padded_rows(257), 512);
   EXPECT_EQ(subm::kPadRows % subm::kMaskRows, 0);
 }
+
+// SparseConv: the rows are point_mask's, and pairs and tile_mask are not padded.
+TEST(SubMContract, ComputedRowsTakeUnpaddedRulebookTensors)
+{
+  using namespace autoware::tensorrt_plugins::subm;  // NOLINT
+  const auto desc = [](nvinfer1::DataType type, std::initializer_list<std::int64_t> dims) {
+    nvinfer1::DynamicPluginTensorDesc d{};
+    d.desc.type = type;
+    d.desc.dims.nbDims = static_cast<std::int32_t>(dims.size());
+    std::int32_t axis = 0;
+    for (const auto extent : dims) {
+      d.desc.dims.d[axis++] = extent;
+    }
+    d.min = d.opt = d.max = d.desc.dims;
+    return d;
+  };
+  using nvinfer1::DataType;
+  const std::int64_t n = 1000, m = 700;
+  nvinfer1::DynamicPluginTensorDesc inputs[kInputs] = {
+    desc(DataType::kHALF, {n, 32}),          desc(DataType::kHALF, {64, 3, 3, 3, 32}),
+    desc(DataType::kINT32, {3, 3, 3, m}),    desc(DataType::kINT32, {m, 1}),
+    desc(DataType::kINT32, {m}),             desc(DataType::kINT32, {m}),
+    desc(DataType::kFLOAT, {64})};
+  EXPECT_FALSE(refusal(inputs, kInputs, DataType::kHALF, Scales{}, Rows::kPointMask));
+  // the same tensors are not a SubMConv's: its rows are the features', padded
+  const Refusal as_subm = refusal(inputs, kInputs, DataType::kHALF, Scales{}, Rows::kFeatures);
+  ASSERT_TRUE(as_subm);
+  EXPECT_NE(as_subm->find("pairs is"), std::string::npos) << *as_subm;
+  // a padded pairs tensor is not a SparseConv's
+  inputs[at(Slot::kPairs)] = desc(DataType::kINT32, {3, 3, 3, padded_rows(700)});
+  const Refusal padded = refusal(inputs, kInputs, DataType::kHALF, Scales{}, Rows::kPointMask);
+  ASSERT_TRUE(padded);
+  EXPECT_NE(padded->find("pairs is"), std::string::npos) << *padded;
+}
