@@ -24,8 +24,6 @@
 namespace nvinfer1::plugin
 {
 
-REGISTER_TENSORRT_PLUGIN(ArgsortPluginCreator);
-
 ArgsortPluginCreator::ArgsortPluginCreator()
 {
   plugin_attributes_.clear();

@@ -163,7 +163,7 @@ if(BUILD_TESTING)
     target_link_libraries(reference_kernels_test PRIVATE cuda_ops GTest::gtest_main plugin_build_options)
     add_test(NAME reference_kernels_test COMMAND reference_kernels_test)
 
-    # Loads the built libraries through dlopen and checks which plugins each provides.
+    # Loads the built libraries and checks which plugins each provides and registers.
     add_executable(plugin_libraries_test test/plugin_libraries_test.cpp)
     add_dependencies(plugin_libraries_test ${PLUGIN_LIBRARIES})
     target_link_libraries(plugin_libraries_test PRIVATE

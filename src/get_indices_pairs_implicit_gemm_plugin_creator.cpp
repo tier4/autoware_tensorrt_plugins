@@ -30,8 +30,6 @@
 namespace nvinfer1::plugin
 {
 
-REGISTER_TENSORRT_PLUGIN(GetIndicesPairsImplicitGemmPluginCreator);
-
 GetIndicesPairsImplicitGemmPluginCreator::GetIndicesPairsImplicitGemmPluginCreator()
 {
   plugin_attributes_.clear();

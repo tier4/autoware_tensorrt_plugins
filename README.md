@@ -13,7 +13,13 @@ The plugins are built into two shared libraries, split by external dependency, a
 | `libautoware_tensorrt_plugins.so`        | `Argsort`, `QuickCumsumCuda`, `SegmentCSR`, `CustomUnique`, `MultiScaleDeformableAttentionPlugin`, `RotatePlugin`, `SelectAndPadPlugin` | CUDA runtime, TensorRT |
 | `libautoware_tensorrt_plugins_spconv.so` | `GetIndicePairs`, `GetIndicePairsImplicitGemm`, `ImplicitGemm`, `IndiceConv`                                                            | + `spconv`, `cumm`     |
 
-A process has to load all libraries its model needs.
+A process has to load all libraries its model needs, with `nvinfer1::IPluginRegistry::loadLibrary`:
+
+```cpp
+getPluginRegistry()->loadLibrary("/path/to/libautoware_tensorrt_plugins.so");
+```
+
+`trtexec --staticPlugins` and `--dynamicPlugins` and the `tensorrt` Python package's `load_library` do the same. The libraries register nothing by themselves: a process that only calls `dlopen` on one finds no plugins.
 
 The spconv library is only built when `spconv` and `cumm` are found at configure time.
 

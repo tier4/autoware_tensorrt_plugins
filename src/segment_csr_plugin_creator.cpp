@@ -25,8 +25,6 @@
 namespace nvinfer1::plugin
 {
 
-REGISTER_TENSORRT_PLUGIN(SegmentCSRPluginCreator);
-
 SegmentCSRPluginCreator::SegmentCSRPluginCreator()
 {
   plugin_attributes_.clear();
